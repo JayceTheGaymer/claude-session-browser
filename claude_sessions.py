@@ -194,6 +194,41 @@ def _linux_reinvoke_command(*extra_args):
     return " ".join(shlex.quote(p) for p in parts)
 
 
+def _linux_notify(title, message):
+    """Desktop-Notification per direktem D-Bus-Aufruf statt tray.icon.notify().
+
+    pystrays eigener Linux-Notifier (pystray/_util/notify_dbus.py) haengt
+    den app_name-Parameter des Notify()-Aufrufs fest auf '' -- weder
+    Icon.name noch Icon.title erreichen ihn ueberhaupt (GtkIcon._notify()
+    leitet nur title/message/icon weiter). Ohne app_name loest der
+    Notification-Daemon (getestet: KDE) ueber die PID des Senders auf und
+    zeigt den Prozessnamen -- 'python3' -- statt eines echten App-Namens.
+    Deshalb hier derselbe D-Bus-Call wie in notify_dbus.py, nur mit
+    echtem app_name."""
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gio, GLib
+    proxy = Gio.DBusProxy.new_for_bus_sync(
+        Gio.BusType.SESSION, Gio.DBusProxyFlags.NONE, None,
+        "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications", None)
+    proxy.call_sync(
+        "Notify",
+        GLib.Variant("(susssasa{sv}i)", (
+            "Clawd", 0, "", title, message, [], {}, -1)),
+        Gio.DBusCallFlags.NONE, -1, None)
+
+
+def _tray_notify(icon, message, title):
+    """Ersetzt icon.notify(message, title) -- auf Linux per direktem
+    D-Bus-Call (siehe _linux_notify) statt pystrays eigenem Notifier, damit
+    der App-Name stimmt; auf Windows unveraendert ueber pystray."""
+    if not _IS_WIN:
+        _linux_notify(title, message)
+        return
+    icon.notify(message, title)
+
+
 def _hook_command():
     """Der Befehl, den Claude Code aufrufen soll."""
     if not _IS_WIN:
@@ -2549,7 +2584,8 @@ class BuddyController:
         tray = getattr(self.api, "_tray", None)
         if tray and tray.icon:
             try:
-                tray.icon.notify(
+                _tray_notify(
+                    tray.icon,
                     t("Dein Claude-Limit ist zurück – weitermachen!"),
                     "Clawd")
             except Exception:
@@ -4976,7 +5012,8 @@ class Api:
             tray = getattr(self, "_tray", None)
             if tray and tray.icon:
                 try:
-                    tray.icon.notify(
+                    _tray_notify(
+                        tray.icon,
                         t("Clawdmeter hat nur noch {pct}% Akku", pct=pct),
                         "Clawd")
                 except Exception:
@@ -5059,7 +5096,8 @@ class Api:
         tray = getattr(self, "_tray", None)
         if tray and tray.icon:
             try:
-                tray.icon.notify(
+                _tray_notify(
+                    tray.icon,
                     t("{pct}% deines 5-Stunden-Limits verbraucht. "
                       "Zurückgesetzt um {when} – in {mins} Minuten.",
                       pct=pct, when=when, mins=mins), "Clawd")
