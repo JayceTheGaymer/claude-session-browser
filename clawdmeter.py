@@ -11,9 +11,10 @@ Protokoll (aus der Clawdmeter-Firmware):
     ...0003  read/notify
     ...0004  notify    -> Geraet bittet um frische Daten
 
-Das Geraet muss einmalig ueber die Windows-Bluetooth-Einstellungen gekoppelt
-werden (es ist zugleich eine BLE-HID-Tastatur). Danach findet dieses Modul
-die Adresse selbst ueber die PnP-Tabelle.
+Das Geraet muss einmalig gekoppelt werden (es ist zugleich eine
+BLE-HID-Tastatur) -- unter Windows ueber die Bluetooth-Einstellungen, unter
+Linux z.B. per `bluetoothctl pair <MAC>`. Danach findet dieses Modul die
+Adresse selbst (Windows: PnP-Tabelle, Linux: `bluetoothctl paired-devices`).
 """
 from __future__ import annotations
 
@@ -245,17 +246,53 @@ _DEVICES_TTL = 30.0
 _BTHLE_KEY = r"SYSTEM\CurrentControlSet\Enum\BTHLE"
 
 
-def list_paired_devices(force: bool = False) -> list[dict]:
-    """Alle in Windows gekoppelten BLE-Geraete: [{name, address}, ...].
+def _list_paired_devices_linux(force: bool = False) -> list[dict]:
+    """Alle unter BlueZ gekoppelten Geraete: [{name, address}, ...].
 
-    Liest die Registry direkt. Frueher lief das ueber PowerShell -- das
-    riss aber jedes Mal ein Konsolenfenster auf, egal welche Flags gesetzt
-    waren. Die Registry-Variante startet keinen Prozess und ist sofort da.
+    Ruft `bluetoothctl devices Paired` -- dieselbe BlueZ-Quelle, aus der
+    auch der eigenstaendige Clawdmeter-Daemon seine Geraete kennt (siehe
+    dessen README: bluetoothctl/busctl sind schon ein dokumentiertes
+    Linux-Prerequisite), kein zusaetzlicher D-Bus-Client noetig. Das
+    dedizierte `paired-devices`-Kommando aelterer bluez-Versionen gibt es
+    in aktuellem bluetoothctl (getestet: 5.87) nicht mehr -- `devices` mit
+    dem Paired-Filter ist der aktuelle Weg (siehe `bluetoothctl --help`).
 
     Ein gekoppeltes UND verbundenes Geraet sendet keine Advertisements mehr,
-    ein normaler BLE-Scan findet es also nicht -- Windows kennt es aber."""
+    ein normaler BLE-Scan faende es also nicht -- BlueZ kennt es trotzdem
+    (gleicher Grund wie bei der Windows-Registry-Variante unten)."""
+    now = time.time()
+    if not force and now - _devices_cache["at"] < _DEVICES_TTL:
+        return list(_devices_cache["value"])
+    out = []
+    try:
+        result = subprocess.run(
+            ["bluetoothctl", "devices", "Paired"],
+            capture_output=True, text=True, timeout=5)
+        for line in result.stdout.splitlines():
+            # Format: "Device XX:XX:XX:XX:XX:XX Anzeigename"
+            parts = line.strip().split(" ", 2)
+            if len(parts) == 3 and parts[0] == "Device":
+                mac, name = parts[1], parts[2]
+                out.append({"name": name.strip() or mac, "address": mac})
+    except Exception:
+        return list(_devices_cache["value"])
+    _devices_cache["at"] = now
+    _devices_cache["value"] = out
+    return list(out)
+
+
+def list_paired_devices(force: bool = False) -> list[dict]:
+    """Alle gekoppelten BLE-Geraete: [{name, address}, ...].
+
+    Windows: liest die Registry direkt. Frueher lief das ueber PowerShell --
+    das riss aber jedes Mal ein Konsolenfenster auf, egal welche Flags
+    gesetzt waren. Die Registry-Variante startet keinen Prozess und ist
+    sofort da. Linux: siehe _list_paired_devices_linux (BlueZ/bluetoothctl).
+
+    Ein gekoppeltes UND verbundenes Geraet sendet keine Advertisements mehr,
+    ein normaler BLE-Scan findet es also nicht -- das OS kennt es aber."""
     if sys.platform != "win32":
-        return []
+        return _list_paired_devices_linux(force)
     now = time.time()
     if not force and now - _devices_cache["at"] < _DEVICES_TTL:
         return list(_devices_cache["value"])

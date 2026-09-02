@@ -19,6 +19,7 @@ import json
 import time
 import zlib
 import queue
+import shlex
 import shutil
 import base64
 import ctypes
@@ -49,7 +50,7 @@ logging.getLogger("pywebview").setLevel(logging.CRITICAL)
 # ----- Version & Update ---------------------------------------------------- #
 VERSION = "1.4.1"
 # Wird beim GitHub-Setup auf dein echtes Repo gesetzt (OWNER/REPO):
-UPDATE_URL = "https://raw.githubusercontent.com/juppeee/claude-session-browser/main/version.json"
+UPDATE_URL = "https://raw.githubusercontent.com/JayceTheGaymer/claude-session-browser/main/version.json"
 
 
 def _vtuple(v):
@@ -164,6 +165,10 @@ def _hook_wartet(session_id, seit):
 
 # Woran wir unsere eigenen Eintraege in fremden Einstellungen wiedererkennen.
 _HOOK_MARKE = "--csb-hook"
+
+# Startet diesen selben Skript-Prozess als GTK-Renderer-Subprozess fuer den
+# Buddy (nur Linux -- siehe BuddyController._run_linux fuer das Warum).
+_BUDDY_OVERLAY_FLAG = "--csb-buddy-overlay"
 
 
 def _hook_command():
@@ -1048,12 +1053,16 @@ def resume_session(session_id, cwd, settings, project=""):
     # Programmnamen oder absoluten Pfad, keine Shell-Metazeichen.
     if any(c in claude for c in '&|;<>"`$'):
         return {"ok": False, "error": t("Unsicherer claude_cmd-Wert.")}
-    term = settings.get("terminal", "auto")
     # Wichtig: CLAUDE_CODE_FORCE_SESSION_PERSIST=1 setzen damit die resumed
     # Session weiterhin in die JSONL schreibt (sonst wird sie als Child erkannt
     # und Transcript-Speicherung ist aus).
     env = os.environ.copy()
     env["CLAUDE_CODE_FORCE_SESSION_PERSIST"] = "1"
+
+    if sys.platform != "win32":
+        return _resume_session_linux(claude, sid, workdir, env)
+
+    term = settings.get("terminal", "auto")
     try:
         if term in ("auto", "wt"):
             try:
@@ -1072,6 +1081,87 @@ def resume_session(session_id, cwd, settings, project=""):
         return {"ok": True}
     except OSError as e:
         return {"ok": False, "error": str(e)}
+
+
+# Reihenfolge, in der Terminal-Emulatoren auf Linux durchprobiert werden
+# ($TERMINAL aus der Umgebung wird davor probiert, falls gesetzt). Jeder
+# Eintrag ist (Programmname, Flag) -- alle hier gelisteten Terminals geben
+# den Rest der Kommandozeile unveraendert als argv an den Kindprozess weiter
+# (kein erneutes Shell-Parsing durch das Terminal selbst), nur das Flag
+# dafuer unterscheidet sich. "direct" heisst: kein Flag noetig, der Befehl
+# folgt direkt.
+_LINUX_TERMINALS = [
+    ("kitty", "direct"),
+    ("foot", "direct"),
+    ("gnome-terminal", "--"),
+    ("konsole", "-e"),
+    ("xfce4-terminal", "-x"),
+    ("tilix", "-e"),
+    ("terminator", "-x"),
+    ("alacritty", "-e"),
+    ("xterm", "-e"),
+    ("urxvt", "-e"),
+]
+
+
+def _user_login_shell():
+    """Login-Shell des Nutzers laut passwd-Datenbank.
+
+    Zuverlaessiger als die $SHELL-Umgebungsvariable: die haengt vom
+    Startkontext ab (z.B. ein systemd-Unit oder eine .desktop-Datei koennen
+    einen anderen Default mitbringen als die per chsh gesetzte Shell) und
+    kann daher vom Login-Shell des Nutzers abweichen."""
+    try:
+        import pwd
+        sh = pwd.getpwuid(os.getuid()).pw_shell
+        if sh and os.path.isfile(sh):
+            return sh
+    except Exception:
+        pass
+    return os.environ.get("SHELL") or "/bin/sh"
+
+
+def _resume_session_linux(claude, sid, workdir, env):
+    """`claude --resume <sid>` in einem Terminal-Fenster starten.
+
+    Kein Windows-Terminal/cmd.exe hier -- wir probieren $TERMINAL und dann
+    eine Reihe gaengiger Linux-Terminal-Emulatoren durch, bis einer da ist.
+
+    Der Befehl laeuft als bash -c '<...>; exec <login-shell>': nach Claude
+    Code bleibt so ein normaler Shell-Prompt im selben Fenster stehen, statt
+    dass es beim Beenden einfach verschwindet -- das Windows-Pendant dazu
+    war cmd /k. claude und sid sind bereits weiter oben validiert (kein
+    Shell-Metazeichen bzw. strenges ID-Muster), shlex.quote ist hier nur die
+    zusaetzliche Absicherung falls claude_cmd z.B. Leerzeichen enthaelt."""
+    inner = " ".join(shlex.quote(a) for a in (claude, "--resume", sid))
+    inner += "; exec " + shlex.quote(_user_login_shell())
+    bash_cmd = ["bash", "-c", inner]
+
+    candidates = []
+    term_env = os.environ.get("TERMINAL")
+    if term_env:
+        candidates.append((term_env, "-e"))
+    candidates += _LINUX_TERMINALS
+
+    tried_any = False
+    for name, mode in candidates:
+        exe = shutil.which(name)
+        if not exe:
+            continue
+        tried_any = True
+        if mode == "direct":
+            argv = [exe] + bash_cmd
+        else:  # "--", "-e" oder "-x" -- Terminal reicht den Rest als argv durch
+            argv = [exe, mode] + bash_cmd
+        try:
+            subprocess.Popen(argv, cwd=workdir, env=env)
+            return {"ok": True}
+        except OSError:
+            continue
+
+    if tried_any:
+        return {"ok": False, "error": t("Terminal ließ sich nicht starten.")}
+    return {"ok": False, "error": t("Kein Terminal-Programm gefunden.")}
 
 
 # --------------------------------------------------------------------------- #
@@ -1772,6 +1862,538 @@ def _shade_hex(hex_color, factor):
         return hex_color
 
 
+# --------------------------------------------------------------------------- #
+#  Buddy-Renderer fuer Linux -- eigener Subprozess, siehe
+#  BuddyController._run_linux fuer das Warum (Tk hat auf Linux kein
+#  Aequivalent zu -transparentcolor; GTK per Cairo schon, aber nur ueber
+#  XWayland (GDK_BACKEND=x11), und GDK_BACKEND gilt pro Prozess -- das
+#  Hauptfenster laeuft schon auf GTK/nativem Wayland ueber pywebview).
+#
+#  Reiner Renderer: kennt weder Sessions noch Aktivitaets-Logik. Bekommt
+#  Animationsname/Position/Groesse/Deckkraft ueber stdin (eine JSON-Zeile
+#  pro Befehl von BuddyController._run_linux) und zeichnet mit Cairo.
+# --------------------------------------------------------------------------- #
+def _buddy_overlay_main():
+    import math
+    import cairo
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib, Gdk
+    from Xlib import display as _xdisplay
+    from Xlib.ext import shape as _xshape
+
+    # POPUP statt TOPLEVEL: setzt override-redirect auf dem X11-Fenster,
+    # d.h. KWin verwaltet Position/Groesse/Stacking dieses Fensters gar
+    # nicht erst -- kein Clamping an Arbeitsflaechen-/Panel-Grenzen mehr
+    # (das UTILITY-Type-Hint auf einem TOPLEVEL reichte dafuer nicht, siehe
+    # Plan-Doku). Menues/Tooltips in GTK nutzen denselben Mechanismus fuer
+    # genau dieses "der WM soll sich da raushalten"-Verhalten -- es ist
+    # das naechste Aequivalent zu Tks overrideredirect(True).
+    win = Gtk.Window(type=Gtk.WindowType.POPUP)
+    win.set_decorated(False)
+    win.set_keep_above(True)
+    win.set_resizable(False)
+    win.set_skip_taskbar_hint(True)
+    win.set_skip_pager_hint(True)
+    win.set_accept_focus(False)
+    # Ohne diesen Hint behandelt KWin (und vermutlich andere WMs) das Fenster
+    # trotz set_decorated(False) weiter wie ein normales Top-Level-Fenster --
+    # inklusive "nicht ueber das Panel schieben"-Regel. Damit klemmt der
+    # Buddy beim Runterziehen an der Taskleiste fest. UTILITY signalisiert
+    # "schwebendes Werkzeugfenster", das die meisten WMs von genau dieser
+    # Platzierungsregel ausnehmen.
+    win.set_type_hint(Gdk.WindowTypeHint.UTILITY)
+    win.add_events(
+        Gdk.EventMask.BUTTON_PRESS_MASK
+        | Gdk.EventMask.BUTTON_RELEASE_MASK
+        | Gdk.EventMask.POINTER_MOTION_MASK
+        | Gdk.EventMask.ENTER_NOTIFY_MASK
+        | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+
+    screen = win.get_screen()
+    visual = screen.get_rgba_visual()
+    if visual is not None:
+        win.set_visual(visual)
+    win.set_app_paintable(True)
+
+    ov = {"scale": 4, "anim": "idle breathe", "frame": 0, "x": 200, "y": 200,
+          "frame_style": "off", "frame_color": "#ec7456", "frame_label": "CLAWD",
+          "placing": False, "place_pulse": 0.0}
+
+    def _hexrgba(hexcol, a=1.0):
+        c = hexcol.lstrip("#")
+        return (int(c[0:2], 16) / 255.0, int(c[2:4], 16) / 255.0,
+                int(c[4:6], 16) / 255.0, a)
+
+    def emit(obj):
+        # Ereignisse zurueck an den Elternprozess (BuddyController._run_linux
+        # liest das von proc.stdout) -- Drag-Position, Doppel-/Rechtsklick,
+        # Hover rein/raus. Reines Reporting, keine eigene Zustandslogik hier.
+        try:
+            sys.stdout.write(json.dumps(obj) + "\n")
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+    drag = {"active": False, "start_x": 0.0, "start_y": 0.0,
+            "win_x": 0, "win_y": 0, "moved": False}
+
+    def on_button_press(widget, event):
+        if event.button == 1:
+            if event.type == Gdk.EventType._2BUTTON_PRESS:
+                drag["active"] = False
+                emit({"ev": "dismiss"})
+                return True
+            drag["active"] = True
+            drag["moved"] = False
+            drag["start_x"], drag["start_y"] = event.x_root, event.y_root
+            drag["win_x"], drag["win_y"] = win.get_position()
+        elif event.button == 3:
+            emit({"ev": "dismiss"})
+        return True
+
+    def on_motion(widget, event):
+        if not drag["active"]:
+            return True
+        dx = event.x_root - drag["start_x"]
+        dy = event.y_root - drag["start_y"]
+        if abs(dx) > 2 or abs(dy) > 2:
+            drag["moved"] = True
+        nx, ny = int(drag["win_x"] + dx), int(drag["win_y"] + dy)
+        # Raster + Bildschirmrand-Snap, wie im Original bei jedem Drag (nicht
+        # nur im Platzier-Modus). _win_monitor_work_from_point (das die
+        # Bildschirmrand-Erkennung darin traegt) ist Windows-only und liefert
+        # auf Linux None -- bleibt dann beim reinen Fein-Raster.
+        w, h = _win_size()
+        nx, ny = _snap_position(nx, ny, w)
+        win.move(nx, ny)
+        ov["x"], ov["y"] = nx, ny
+        return True
+
+    def on_button_release(widget, event):
+        if event.button == 1 and drag["active"]:
+            drag["active"] = False
+            if drag["moved"]:
+                emit({"ev": "moved", "x": ov["x"], "y": ov["y"]})
+                if ov["placing"]:
+                    ov["placing"] = False
+                    _hide_grid_overlay()
+                    emit({"ev": "place_done"})
+        return True
+
+    def on_enter(widget, event):
+        # Waehrend eines aktiven Drags haengt die Fensterposition dem
+        # Mauszeiger einen Frame hinterher (win.move() braucht einen
+        # Serverumlauf) -- bei schnellen Bewegungen landet der Zeiger dadurch
+        # kurz ausserhalb der (noch alten) Fenstergrenzen, was Enter/Leave im
+        # Sekundentakt ausloest. Das liest sich als flackernde Deckkraft,
+        # weil jedes davon einen Hover-Alpha-Snap anstoesst. Waehrend des
+        # Drags ist "Hover" ohnehin kein sinnvolles Konzept -- unterdruecken.
+        if drag["active"]:
+            return True
+        emit({"ev": "hover", "value": True})
+        return True
+
+    def on_leave(widget, event):
+        if drag["active"]:
+            return True
+        emit({"ev": "hover", "value": False})
+        return True
+
+    win.connect("button-press-event", on_button_press)
+    win.connect("motion-notify-event", on_motion)
+    win.connect("button-release-event", on_button_release)
+    win.connect("enter-notify-event", on_enter)
+    win.connect("leave-notify-event", on_leave)
+
+    # ---- Platzier-Modus: Vollflaechen-Raster-Overlay als Orientierung ----
+    grid_ctx = {"win": None}
+
+    def _hide_grid_overlay():
+        if grid_ctx["win"] is not None:
+            try:
+                grid_ctx["win"].destroy()
+            except Exception:
+                pass
+            grid_ctx["win"] = None
+
+    def _show_grid_overlay():
+        if grid_ctx["win"] is not None:
+            return
+        screen = win.get_screen()
+        vw, vh = screen.get_width(), screen.get_height()
+        gwin = Gtk.Window(type=Gtk.WindowType.POPUP)
+        gwin.set_decorated(False)
+        gwin.set_default_size(vw, vh)
+        gwin.set_resizable(False)
+        visual = screen.get_rgba_visual()
+        if visual is not None:
+            gwin.set_visual(visual)
+        gwin.set_app_paintable(True)
+
+        def on_grid_draw(widget, cr):
+            cr.set_operator(cairo.OPERATOR_SOURCE)
+            cr.set_source_rgba(*_hexrgba("#0a0b0d", 0.42))
+            cr.paint()
+            cr.set_operator(cairo.OPERATOR_OVER)
+            for step, hexcol in ((20, "#3a3d42"), (100, "#5c6068")):
+                cr.set_source_rgba(*_hexrgba(hexcol))
+                cr.set_line_width(1)
+                x = 0
+                while x < vw:
+                    cr.move_to(x, 0); cr.line_to(x, vh); cr.stroke()
+                    x += step
+                y = 0
+                while y < vh:
+                    cr.move_to(0, y); cr.line_to(vw, y); cr.stroke()
+                    y += step
+            return False
+
+        gwin.connect("draw", on_grid_draw)
+        gwin.move(0, 0)
+        gwin.show_all()
+
+        def _make_clickthrough():
+            # Leere Input-Shape -- das Raster ist nur zur Orientierung, ein
+            # Klick soll immer den Buddy greifen (eigenes Fenster obendrauf),
+            # nie das Overlay selbst. Gleicher Mechanismus wie fuer den
+            # Buddy in update_input_shape, nur mit leerer Rechteckliste.
+            try:
+                gdk_win = gwin.get_window()
+                if gdk_win is None:
+                    return False
+                d = _xdisplay.Display()
+                xwin = d.create_resource_object("window", gdk_win.get_xid())
+                xwin.shape_rectangles(_xshape.SO.Set, _xshape.SK.Input, 0, 0, 0, [])
+                d.sync()
+            except Exception:
+                pass
+            return False
+
+        GLib.idle_add(_make_clickthrough)
+        try:
+            win.get_window().raise_()  # Buddy bleibt ueber dem Raster
+        except Exception:
+            pass
+        grid_ctx["win"] = gwin
+
+    def _pad():
+        return _frame_pad(ov["frame_style"], ov["scale"])
+
+    def _win_size():
+        p = _pad()
+        return 20 * ov["scale"] + p["l"] + p["r"], 20 * ov["scale"] + p["t"] + p["b"]
+
+    def apply_geometry():
+        w, h = _win_size()
+        win.resize(w, h)
+        win.move(ov["x"], ov["y"])
+
+    def _current_frame():
+        anim = BUDDY_ANIMS.get(ov["anim"]) or next(iter(BUDDY_ANIMS.values()), None)
+        frames = anim["frames"] if anim else None
+        if not frames:
+            return None, None, None
+        f = frames[ov["frame"] % len(frames)]
+        return f, anim["palette"], _hintergrund_index(f)
+
+    def draw_frame_classic(cr, w, h, pad, color, label):
+        """Cairo-Portierung von _draw_frame_classic (Tk-Canvas-Version):
+        Tech-Rahmen mit achteckigen Ecken, Nameplate unten, LIVE-Dot."""
+        def fill_poly(points, hexcol):
+            cr.set_source_rgba(*_hexrgba(hexcol))
+            cr.move_to(points[0], points[1])
+            for i in range(2, len(points), 2):
+                cr.line_to(points[i], points[i + 1])
+            cr.close_path()
+            cr.fill()
+
+        dark = "#14100e"
+        darker = _shade_hex(color, 0.55)
+        accent_dim = _shade_hex(color, 0.75)
+        cream = "#F1EBDD"
+
+        cut = max(4, pad["l"] // 2)
+        fill_poly([cut, 0, w - cut, 0, w, cut, w, h - cut,
+                   w - cut, h, cut, h, 0, h - cut, 0, cut], color)
+
+        cam_l, cam_t = pad["l"], pad["t"]
+        cam_r, cam_b = w - pad["r"], h - pad["b"] + 2
+        cr.set_source_rgba(*_hexrgba(dark))
+        cr.rectangle(cam_l, cam_t, cam_r - cam_l, cam_b - cam_t)
+        cr.fill()
+
+        corner_len = max(4, pad["l"] // 2)
+        cr.set_line_width(2)
+        cr.set_source_rgba(*_hexrgba(color))
+        for cx, cy, dx, dy in ((cam_l, cam_t, 1, 1), (cam_r, cam_t, -1, 1),
+                               (cam_l, cam_b, 1, -1), (cam_r, cam_b, -1, -1)):
+            cr.move_to(cx, cy); cr.line_to(cx + dx * corner_len, cy); cr.stroke()
+            cr.move_to(cx, cy); cr.line_to(cx, cy + dy * corner_len); cr.stroke()
+
+        stripe_w = max(6, w // 8)
+        top_y = pad["t"] // 2
+        cr.set_source_rgba(*_hexrgba(darker))
+        cr.set_line_width(2)
+        for dx in (-stripe_w - 4, 0, stripe_w + 4):
+            cx = w // 2 + dx
+            cr.move_to(cx - 3, top_y); cr.line_to(cx + 3, top_y); cr.stroke()
+
+        plate_top = h - pad["b"] + 3
+        plate_bot = h - 3
+        plate_half = min(w // 2 - 6, max(24, int(w * 0.36)))
+        plate_cx = w // 2
+        fill_poly([plate_cx - plate_half + 6, plate_top,
+                   plate_cx + plate_half - 6, plate_top,
+                   plate_cx + plate_half, plate_bot,
+                   plate_cx - plate_half, plate_bot], darker)
+        cr.set_source_rgba(*_hexrgba(accent_dim))
+        cr.set_line_width(1)
+        cr.move_to(plate_cx - plate_half + 8, plate_top + 1)
+        cr.line_to(plate_cx + plate_half - 8, plate_top + 1)
+        cr.stroke()
+
+        font_size = max(6, min(11, (plate_bot - plate_top) - 4))
+        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(font_size)
+        text = (label or "CLAWD").upper()[:7]
+        ext = cr.text_extents(text)
+        cr.set_source_rgba(*_hexrgba(cream))
+        cr.move_to(plate_cx - ext.width / 2 - ext.x_bearing,
+                  (plate_top + plate_bot) / 2 - ext.height / 2 - ext.y_bearing)
+        cr.show_text(text)
+
+        dot_r = max(2, pad["t"] // 3)
+        dot_cx = w - pad["r"] - dot_r - 2
+        dot_cy = pad["t"] // 2
+        cr.set_source_rgba(*_hexrgba("#ff3a5a"))
+        cr.arc(dot_cx, dot_cy, dot_r, 0, 2 * math.pi)
+        cr.fill()
+
+    def on_draw(widget, cr):
+        # Erst alles komplett durchsichtig machen (OPERATOR_SOURCE ueber-
+        # schreibt statt zu blenden), dann Rahmen (falls an) und Sprite drauf.
+        cr.save()
+        cr.set_source_rgba(0, 0, 0, 0)
+        cr.set_operator(cairo.OPERATOR_SOURCE)
+        cr.paint()
+        cr.restore()
+        cr.set_operator(cairo.OPERATOR_OVER)
+
+        pad = _pad()
+        w, h = _win_size()
+        frame_on = ov["frame_style"] != "off"
+        if frame_on:
+            draw_frame_classic(cr, w, h, pad, ov["frame_color"], ov["frame_label"])
+
+        f, palette, hg_idx = _current_frame()
+        if f is None:
+            return False
+        sc = ov["scale"]
+        for row in range(20):
+            ridx = row * 20
+            for col in range(20):
+                idx = f[ridx + col]
+                empty = idx <= 0 or idx == hg_idx or idx >= len(palette)
+                if empty:
+                    # Ohne Rahmen bleibt die Flaeche durchsichtig; mit Rahmen
+                    # bleibt die dunkle Cam-Flaeche stehen (ein Rahmen um
+                    # nichts saehe seltsam aus) -- wie im Original.
+                    if not frame_on:
+                        continue
+                    cr.set_source_rgba(*_hexrgba("#14100e"))
+                else:
+                    cr.set_source_rgba(*_hexrgba(palette[idx]))
+                cr.rectangle(pad["l"] + col * sc, pad["t"] + row * sc, sc, sc)
+                cr.fill()
+
+        if ov["placing"]:
+            intensity = 2 + 3 * (0.5 + 0.5 * math.sin(ov["place_pulse"]))
+            cr.set_source_rgba(*_hexrgba("#ffd66b"))
+            cr.set_line_width(intensity)
+            cr.rectangle(1, 1, w - 2, h - 2)
+            cr.stroke()
+        return False
+
+    win.connect("draw", on_draw)
+
+    # ---- Input-Shape: Hover/Klick/Drag nur auf den tatsaechlich gezeich-
+    # neten Sprite-Zellen, nicht auf der ganzen scale*scale-Bounding-Box.
+    # Windows' -transparentcolor macht die durchsichtigen Flaechen automatisch
+    # klickdurchlaessig -- X11s SHAPE-Extension kennt dafuer zwei getrennte
+    # Kinds: Bounding (nur Optik, hier von KWin/XWayland nicht honoriert,
+    # siehe Plan-Doku) und Input (Hit-Testing, funktioniert hier laut Test).
+    _shape_ctx = {"xwin": None, "conn": None}
+
+    def _shape_window():
+        if _shape_ctx["xwin"] is not None:
+            return _shape_ctx["xwin"] or None
+        try:
+            gdk_win = win.get_window()
+            if gdk_win is None:
+                return None  # noch nicht realisiert -- spaeter erneut versuchen
+            d = _xdisplay.Display()
+            _shape_ctx["conn"] = d
+            _shape_ctx["xwin"] = d.create_resource_object("window", gdk_win.get_xid())
+        except Exception:
+            _shape_ctx["xwin"] = False  # dauerhaft aufgeben, nicht jedes Mal neu versuchen
+        return _shape_ctx["xwin"] or None
+
+    def update_input_shape():
+        xwin = _shape_window()
+        if not xwin:
+            return
+        # Mit Rahmen ist die ganze Flaeche gewollt "da" (siehe on_draw) --
+        # dann soll auch Hover/Drag/Klick ueberall im Rahmen greifen, nicht
+        # nur auf den Sprite-Zellen. Ohne Rahmen bleibt es bei der
+        # zellengenauen Maske aus Stufe 2. Im Platzier-Modus immer die volle
+        # Flaeche greifbar -- sonst laesst sich der Buddy nur noch am
+        # Koerper anfassen, und genau da will man ihn beim Verschieben am
+        # wenigsten treffen muessen (wie im Original).
+        if ov["frame_style"] != "off" or ov["placing"]:
+            w, h = _win_size()
+            rects = [{"x": 0, "y": 0, "width": w, "height": h}]
+        else:
+            f, palette, hg_idx = _current_frame()
+            if f is None:
+                return
+            sc = ov["scale"]
+            rects = []
+            for row in range(20):
+                ridx = row * 20
+                run_start = None
+                for col in range(20):
+                    idx = f[ridx + col]
+                    occupied = not (idx <= 0 or idx == hg_idx or idx >= len(palette))
+                    if occupied and run_start is None:
+                        run_start = col
+                    elif not occupied and run_start is not None:
+                        rects.append({"x": run_start * sc, "y": row * sc,
+                                      "width": (col - run_start) * sc, "height": sc})
+                        run_start = None
+                if run_start is not None:
+                    rects.append({"x": run_start * sc, "y": row * sc,
+                                  "width": (20 - run_start) * sc, "height": sc})
+        try:
+            xwin.shape_rectangles(_xshape.SO.Set, _xshape.SK.Input, 0, 0, 0, rects)
+            _shape_ctx["conn"].sync()
+        except Exception:
+            pass
+
+    def advance_frame():
+        ov["frame"] += 1
+        if ov["placing"]:
+            ov["place_pulse"] = (ov["place_pulse"] + 0.14) % (2 * math.pi)
+        win.queue_draw()
+        update_input_shape()
+        return True  # GLib-Timeout am Leben halten
+
+    GLib.timeout_add(180, advance_frame)  # ~5.5 fps, wie _FRAME_MS unter Windows
+
+    def _gdk_monitor_rect(monitor_idx, cx, cy):
+        # Linux-Pendant zu _win_enum_monitors/_win_monitor_work_from_point
+        # (beide Windows-only, liefern auf Linux None bzw. []) -- GDK kennt
+        # Monitor-Arbeitsbereiche (ohne Panel/Taskleiste) genauso.
+        try:
+            display = Gdk.Display.get_default()
+            mon = None
+            if monitor_idx is not None:
+                n = display.get_n_monitors()
+                if 0 <= monitor_idx < n:
+                    mon = display.get_monitor(monitor_idx)
+            if mon is None:
+                mon = display.get_monitor_at_point(int(cx), int(cy))
+            if mon is None:
+                return None
+            wa = mon.get_workarea()
+            return (wa.x, wa.y, wa.x + wa.width, wa.y + wa.height)
+        except Exception:
+            return None
+
+    def handle_cmd(obj):
+        op = obj.get("op")
+        if op == "quit":
+            Gtk.main_quit()
+            return False
+        if op == "anim":
+            name = obj.get("name") or ov["anim"]
+            if name != ov["anim"]:
+                ov["anim"] = name
+                ov["frame"] = 0
+        elif op == "alpha":
+            try:
+                win.set_opacity(max(0.0, min(1.0, float(obj.get("value", 1.0)))))
+            except Exception:
+                pass
+        elif op == "geometry":
+            if "scale" in obj:
+                ov["scale"] = max(2, min(10, int(obj["scale"])))
+            if "x" in obj:
+                ov["x"] = int(obj["x"])
+            if "y" in obj:
+                ov["y"] = int(obj["y"])
+            apply_geometry()
+            update_input_shape()
+        elif op == "frame":
+            if "style" in obj:
+                ov["frame_style"] = obj["style"] or "off"
+            if "color" in obj:
+                ov["frame_color"] = obj["color"] or "#ec7456"
+            if "label" in obj:
+                ov["frame_label"] = obj["label"] or "CLAWD"
+            apply_geometry()
+            update_input_shape()
+        elif op == "place":
+            if bool(obj.get("value")):
+                ov["placing"] = True
+                ov["place_pulse"] = 0.0
+                _show_grid_overlay()
+            else:
+                ov["placing"] = False
+                _hide_grid_overlay()
+            update_input_shape()
+        elif op == "anchor":
+            w, h = _win_size()
+            cx, cy = ov["x"] + w // 2, ov["y"] + h // 2
+            rect = _gdk_monitor_rect(obj.get("monitor_idx"), cx, cy)
+            if rect:
+                l, t, r, b = rect
+                m = 16
+                xmid, ymid = (l + r - w) // 2, (t + b - h) // 2
+                pos = {
+                    "tl": (l + m, t + m), "tc": (xmid, t + m), "tr": (r - w - m, t + m),
+                    "ml": (l + m, ymid), "c": (xmid, ymid), "mr": (r - w - m, ymid),
+                    "bl": (l + m, b - h - m), "bc": (xmid, b - h - m),
+                    "br": (r - w - m, b - h - m),
+                }
+                nx, ny = pos.get(obj.get("anchor"), (ov["x"], ov["y"]))
+                ov["x"], ov["y"] = int(nx), int(ny)
+                apply_geometry()
+                update_input_shape()
+                emit({"ev": "moved", "x": ov["x"], "y": ov["y"]})
+        win.queue_draw()
+        return False
+
+    def stdin_reader():
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            GLib.idle_add(handle_cmd, obj)
+        GLib.idle_add(Gtk.main_quit)
+
+    threading.Thread(target=stdin_reader, daemon=True).start()
+
+    apply_geometry()
+    win.set_opacity(0.0)
+    win.show_all()
+    Gtk.main()
+
+
 class BuddyController:
     """Zeigt einen kleinen Clawd-Buddy als frameloses, transparentes,
     always-on-top Tkinter-Fenster. Laeuft in einem Daemon-Thread. Wechselt
@@ -1850,7 +2472,8 @@ class BuddyController:
         if not BUDDY_ANIMS:
             return                  # Sprites konnten nicht dekodiert werden
         self._alive = True
-        self._thread = threading.Thread(target=self._run, daemon=True,
+        target = self._run if _IS_WIN else self._run_linux
+        self._thread = threading.Thread(target=target, daemon=True,
                                         name="BuddyThread")
         self._thread.start()
 
@@ -1955,6 +2578,16 @@ class BuddyController:
         """Buddy exakt auf (x,y) setzen."""
         if self.is_alive():
             self._q.put(("jump", (int(x), int(y))))
+
+    def jump_to_anchor(self, anchor, monitor_idx=None):
+        """Wie jump_to, aber zu einem benannten Ankerpunkt (tl,tc,tr,ml,c,
+        mr,bl,bc,br) statt fester Pixel -- Linux-Pfad, da die Zielposition
+        Monitor-Geometrie braucht, die auf Linux nur der GTK-Subprozess kennt
+        (siehe _gdk_monitor_rect dort; das Windows-Pendant _anchor_position
+        rechnet das schon im Hauptprozess aus, bevor jump_to() aufgerufen
+        wird)."""
+        if self.is_alive():
+            self._q.put(("jump_anchor", (anchor, monitor_idx)))
 
     def place_mode(self, on_done=None):
         """Positionier-Modus: Buddy pulsiert damit man ihn leicht findet,
@@ -2823,6 +3456,423 @@ class BuddyController:
             self._alive = False
             self._pub_rect = None
 
+    def _run_linux(self):
+        """Linux-Pendant zu _run(). Zustands-/Anim-Auswahl (detect_state,
+        choose_anim, desired_visible, Fade-Kurve) ist bewusst 1:1 aus _run()
+        uebernommen statt gemeinsam extrahiert -- eine Extraktion waere
+        sauberer, aber ohne Windows-Maschine zum Gegenpruefen ist das
+        Risiko, die dort bereits ausgetestete Logik beim Umbau versehentlich
+        zu veraendern, groesser als der Preis der Duplizierung. Ergaenzen
+        an EINER Stelle heisst also: an beiden nachziehen.
+
+        Rendering, Dragging, Hover, Rahmen-Stile und Platzier-Modus leben
+        NICHT hier, sondern im GTK-Subprozess (_buddy_overlay_main) -- diese
+        Methode schickt ihm Zustandsupdates per stdin und liest Ereignisse
+        (Drag-Position, Doppel-/Rechtsklick, Hover) von seinem stdout.
+        Stufe 3/4 (Rahmen-Stile, Platzier-Modus) fehlen noch."""
+        proc = None
+        try:
+            env = os.environ.copy()
+            env["GDK_BACKEND"] = "x11"
+            proc = subprocess.Popen(
+                [sys.executable, os.path.abspath(__file__), _BUDDY_OVERLAY_FLAG],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                env=env, text=True, bufsize=1)
+        except Exception:
+            self._alive = False
+            return
+        self._proc = proc
+
+        def send(obj):
+            try:
+                proc.stdin.write(json.dumps(obj) + "\n")
+                proc.stdin.flush()
+            except Exception:
+                pass
+
+        def read_events():
+            # Eigener Thread: proc.stdout.readline() blockiert, darf also
+            # nicht im Tick-Loop stehen. Ereignisse landen in derselben
+            # Queue wie UI-Kommandos (push/surprise/...) -- process_cmds
+            # unten liest beide unterschiedslos.
+            try:
+                for line in proc.stdout:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    ev = obj.get("ev")
+                    if ev == "moved":
+                        self._q.put(("ov_moved", (obj.get("x"), obj.get("y"))))
+                    elif ev == "dismiss":
+                        self._q.put(("hide_toggle", None))
+                    elif ev == "hover":
+                        self._q.put(("ov_hover", bool(obj.get("value"))))
+                    elif ev == "place_done":
+                        self._q.put(("place_done", None))
+            except Exception:
+                pass
+
+        threading.Thread(target=read_events, daemon=True,
+                         name="BuddyOverlayEvents").start()
+
+        s = dict(self.api.settings.get("buddy", {}))
+        scale = max(2, min(10, int(s.get("size", 4))))
+        opacity = max(20, min(100, int(s.get("opacity", 100)))) / 100.0
+        x, y = int(s.get("x", 200)), int(s.get("y", 200))
+        frame_style = _resolved_frame_style(s)
+        frame_color = s.get("frame_color") or "#ec7456"
+        frame_label = s.get("frame_label") or "CLAWD"
+        send({"op": "geometry", "scale": scale, "x": x, "y": y})
+        send({"op": "frame", "style": frame_style, "color": frame_color,
+             "label": frame_label})
+
+        state = {
+            "scale": scale,
+            "opacity": opacity,
+            "frame_style": frame_style,
+            "frame_color": frame_color,
+            "frame_label": frame_label,
+            "anim": "idle breathe",
+            "pending_anim": None,
+            "pending_since": 0.0,
+            "surprise_until": 0.0,
+            "preview_until": 0.0,
+            "preview_anim": "",
+            "current_alpha": 0.0,
+            "target_alpha": 0.0,
+            "was_visible": False,
+            "invisible_since": 0.0,
+            "snooze_keys": None,
+            "snooze_empty_since": 0.0,
+            "last_status_check": 0.0,
+            "last_known_mtime": 0.0,
+            "last_mtime": 0.0,
+            "is_limited": False,
+            "limit_type": None,
+            "limited_until": 0.0,
+            "is_waiting": False,
+            "is_awaiting_approval": False,
+            "internal_state": "no_session",
+            "stable_state": None,
+            "stable_since": 0.0,
+            "hover": False,
+            "hover_started_at": 0.0,
+            "wink_fired_this_hover": False,
+            "wink_until": 0.0,
+            "placing": False,
+            "tick": 0,
+        }
+
+        _HIGH_PRIO_STATES = {"done", "tool_pending_approval", "rate_limited",
+                            "auth_required", "api_overloaded", "no_session"}
+        _WORKING_STATES = {"tool_running", "processing_tool_result",
+                          "responding_text", "thinking", "user_sent_prompt"}
+
+        def detect_state():
+            now = time.time()
+            if now - state.get("last_mtime_check", 0) > 0.5:
+                state["last_mtime_check"] = now
+                pdir = ""
+                try:
+                    pdir = self.api._projects_dir()
+                except Exception:
+                    pdir = ""
+                new_mtime = _latest_session_mtime(pdir)
+                mtime_changed = new_mtime != state["last_known_mtime"]
+                state["last_known_mtime"] = new_mtime
+                state["last_mtime"] = new_mtime
+                should_check = mtime_changed or (now - state["last_status_check"] > 2.0)
+                if new_mtime > 0 and should_check:
+                    state["last_status_check"] = now
+                    try:
+                        status = _latest_jsonl_status(pdir)
+                    except Exception:
+                        status = {"internal_state": "no_session", "is_limit": False}
+                    new_limited = bool(status.get("is_limit"))
+                    new_limit_type = status.get("limit_type")
+                    reset_at = float(status.get("reset_at") or 0.0)
+                    if new_limited:
+                        state["is_limited"] = True
+                        state["limit_type"] = new_limit_type
+                        state["limited_until"] = reset_at if reset_at > 0 else now + 60
+                        try:
+                            prev = float(self.api.settings.get("limit_reset_at", 0) or 0)
+                            if reset_at > 0 and abs(prev - reset_at) > 30:
+                                self.api.settings["limit_reset_at"] = reset_at
+                                save_json(SETTINGS_FILE, self.api.settings)
+                                self._schedule_reset_timer(reset_at)
+                        except Exception:
+                            pass
+                    elif state["is_limited"]:
+                        if now > state["limited_until"]:
+                            int_state = status.get("internal_state", "")
+                            if int_state in _WORKING_STATES or int_state == "done":
+                                try:
+                                    self._notify_limit_reset()
+                                except Exception:
+                                    pass
+                                state["is_limited"] = False
+                                state["limit_type"] = None
+                    state["is_waiting"] = bool(status.get("waiting"))
+                    state["is_awaiting_approval"] = bool(status.get("awaiting_approval"))
+                    state["internal_state"] = status.get("internal_state", "unknown_active")
+
+            if state["last_mtime"] <= 0:
+                return "none"
+            age = time.time() - state["last_mtime"]
+            int_state = state.get("internal_state", "unknown_active")
+            if state["is_limited"] and age < 3600:
+                return "limit"
+            if state["is_awaiting_approval"] and age < 300:
+                return "awaiting_approval"
+            if int_state == "done" and age < 180:
+                return "waiting"
+            if int_state in _WORKING_STATES and age < 300:
+                if state["stable_state"] != int_state:
+                    state["stable_state"] = int_state
+                    state["stable_since"] = time.time()
+                if int_state in ("thinking", "user_sent_prompt"):
+                    return "thinking"
+                if int_state == "tool_pending_approval":
+                    return "awaiting_approval"
+                return "active"
+            if int_state not in _WORKING_STATES:
+                state["stable_state"] = None
+                state["stable_since"] = 0.0
+            if state["is_waiting"] and age < 180:
+                return "waiting"
+            if age < 300:
+                return "recent"
+            if age < 900:
+                return "idle"
+            return "sleep"
+
+        def choose_anim():
+            bud = self.api.settings.get("buddy", {})
+            now = time.time()
+            if now < state["preview_until"] and state["preview_anim"] in BUDDY_ANIMS:
+                return state["preview_anim"]
+            if now < state["surprise_until"]:
+                return BUDDY_STATE_MAP["surprise"]
+            # Wink-Easter-Egg: einmal pro Hover-Session zwinkern nach 10s Dwell.
+            if state.get("hover") and state["hover_started_at"] > 0 \
+                    and not state.get("wink_fired_this_hover"):
+                if now - state["hover_started_at"] > 10:
+                    state["wink_fired_this_hover"] = True
+                    state["wink_until"] = now + 2.5
+            if now < state["wink_until"]:
+                return BUDDY_STATE_MAP["wink"]
+            if bud.get("party"):
+                style = str(bud.get("party_style", "bounce")).lower()
+                return BUDDY_STATE_MAP["party_sway"] if style == "sway" else BUDDY_STATE_MAP["party"]
+            act = detect_state()
+            return BUDDY_STATE_MAP.get(act, "idle breathe")
+
+        def _desired_visible_raw():
+            bud = self.api.settings.get("buddy", {})
+            if not bud.get("enabled"):
+                return False
+            if getattr(self.api, "_current_view", "") == "buddy":
+                if self._app_window_visible():
+                    return True
+            mode = bud.get("visibility", "when_claude")
+            if mode == "always":
+                return True
+            if mode == "when_window":
+                # Fenstertitel-Erkennung ist ein Windows-Konzept
+                # (_win_foreground_title liefert auf Linux immer "").
+                return False
+            if mode == "when_claude":
+                return _claude_context_active()
+            return True
+
+        def desired_visible():
+            want = _desired_visible_raw()
+            snooze = state.get("snooze_keys")
+            if snooze is not None:
+                keys = _claude_context_keys()
+                on_buddy_tab = (getattr(self.api, "_current_view", "") == "buddy"
+                                and self._app_window_visible())
+                if state.get("placing") or on_buddy_tab:
+                    state["snooze_keys"] = None
+                    state["snooze_empty_since"] = 0.0
+                else:
+                    over, since = _snooze_over(
+                        snooze, keys, state.get("snooze_empty_since") or 0.0, time.time())
+                    state["snooze_empty_since"] = since
+                    if not over:
+                        return False
+                    state["snooze_keys"] = None
+            return want
+
+        def process_cmds():
+            nonlocal x, y
+            try:
+                while True:
+                    cmd, val = self._q.get_nowait()
+                    if cmd == "quit":
+                        self._alive = False
+                        return False
+                    elif cmd == "refresh":
+                        state["snooze_keys"] = None
+                        state["snooze_empty_since"] = 0.0
+                        new = self.api.settings.get("buddy", {})
+                        new_scale = max(2, min(10, int(new.get("size", 4))))
+                        new_op = max(20, min(100, int(new.get("opacity", 100)))) / 100.0
+                        new_style = _resolved_frame_style(new)
+                        new_color = new.get("frame_color") or "#ec7456"
+                        new_label = new.get("frame_label") or "CLAWD"
+                        if new_scale != state["scale"]:
+                            state["scale"] = new_scale
+                            send({"op": "geometry", "scale": new_scale})
+                        if (new_style != state["frame_style"]
+                                or new_color != state["frame_color"]
+                                or new_label != state["frame_label"]):
+                            state["frame_style"] = new_style
+                            state["frame_color"] = new_color
+                            state["frame_label"] = new_label
+                            send({"op": "frame", "style": new_style,
+                                 "color": new_color, "label": new_label})
+                        if abs(new_op - state["opacity"]) > 0.001:
+                            state["opacity"] = new_op
+                            if state["was_visible"]:
+                                state["target_alpha"] = new_op
+                    elif cmd == "hide_toggle":
+                        state["snooze_keys"] = _claude_context_keys()
+                        state["snooze_empty_since"] = 0.0
+                    elif cmd == "pulse":
+                        state["surprise_until"] = time.time() + 1.6
+                    elif cmd == "preview":
+                        name, seconds = val
+                        if name in BUDDY_ANIMS:
+                            state["preview_anim"] = name
+                            state["preview_until"] = time.time() + seconds
+                    elif cmd == "ov_moved":
+                        nx, ny = val
+                        if nx is not None and ny is not None:
+                            x, y = int(nx), int(ny)
+                            bud = self.api.settings.setdefault("buddy", {})
+                            bud["x"], bud["y"] = x, y
+                            try:
+                                save_json(SETTINGS_FILE, self.api.settings)
+                            except Exception:
+                                pass
+                    elif cmd == "ov_hover":
+                        hovering = bool(val)
+                        state["hover"] = hovering
+                        if hovering:
+                            state["hover_started_at"] = time.time()
+                        else:
+                            state["hover_started_at"] = 0.0
+                            state["wink_fired_this_hover"] = False
+                        # Sofort springen statt ueber step_fade einzuschleichen --
+                        # spiegelt Windows' "sofort, kein Fade" bei Hover.
+                        if state["was_visible"]:
+                            target = (min(state["opacity"], 0.15) if hovering
+                                     else state["opacity"])
+                            state["current_alpha"] = target
+                            state["target_alpha"] = target
+                            send({"op": "alpha", "value": target})
+                    elif cmd == "place":
+                        state["placing"] = True
+                        send({"op": "place", "value": True})
+                    elif cmd == "place_done":
+                        state["placing"] = False
+                        cb = getattr(self, "_on_place_done", None)
+                        if cb:
+                            try:
+                                cb()
+                            except Exception:
+                                pass
+                    elif cmd == "jump_anchor":
+                        anchor, monitor_idx = val
+                        send({"op": "anchor", "anchor": anchor, "monitor_idx": monitor_idx})
+                    # "jump" (Buddy exakt auf feste Pixel setzen): kein
+                    # UI-Pfad ruft das direkt auf -- die Quick-Pick-Buttons
+                    # gehen ueber "jump_anchor" oben, das die Zielposition
+                    # erst im Subprozess ausrechnet (siehe jump_to_anchor).
+            except queue.Empty:
+                pass
+            return True
+
+        def apply_visibility():
+            want = desired_visible()
+            if want:
+                state["target_alpha"] = (min(state["opacity"], 0.15)
+                                         if state.get("hover") else state["opacity"])
+                state["invisible_since"] = 0.0
+            else:
+                state["target_alpha"] = 0.0
+                if state["invisible_since"] == 0.0:
+                    state["invisible_since"] = time.time()
+            state["was_visible"] = want
+
+        def step_fade():
+            cur, tgt = state["current_alpha"], state["target_alpha"]
+            if abs(cur - tgt) < 0.02:
+                if cur != tgt:
+                    state["current_alpha"] = tgt
+                    send({"op": "alpha", "value": tgt})
+                return
+            step = 0.12 if tgt > cur else -0.12
+            new = cur + step
+            if (step > 0 and new > tgt) or (step < 0 and new < tgt):
+                new = tgt
+            state["current_alpha"] = new
+            send({"op": "alpha", "value": max(0.0, min(1.0, new))})
+
+        try:
+            while self._alive:
+                state["tick"] += 1
+                if not process_cmds():
+                    break
+                apply_visibility()
+                step_fade()
+                chosen = choose_anim()
+                now = time.time()
+                _priority = {"limit", "allow", "expression surprise", "expression wink"}
+                if chosen != state["anim"]:
+                    if chosen in _priority or state.get("preview_until", 0) > now:
+                        state["anim"] = chosen
+                    else:
+                        if state.get("pending_anim") != chosen:
+                            state["pending_anim"] = chosen
+                            state["pending_since"] = now
+                        elif now - state["pending_since"] >= self._STATE_DEBOUNCE_S:
+                            state["anim"] = chosen
+                            state["pending_anim"] = None
+                else:
+                    state["pending_anim"] = None
+                if state["anim"] != self._pub_anim:
+                    send({"op": "anim", "name": state["anim"]})
+                self._pub_anim = state["anim"]
+                self._pub_limit = (bool(state.get("is_limited")),
+                                   float(state.get("limited_until") or 0.0))
+                pad = _frame_pad(state["frame_style"], state["scale"])
+                px_w = 20 * state["scale"] + pad["l"] + pad["r"]
+                px_h = 20 * state["scale"] + pad["t"] + pad["b"]
+                self._pub_rect = (x, y, px_w, px_h)
+                time.sleep(self._TICK_MS / 1000.0)
+        finally:
+            self._alive = False
+            self._pub_rect = None
+            send({"op": "quit"})
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
 
 # --------------------------------------------------------------------------- #
 #  Limit-Reset-Karte: schwebende Karte oben rechts, bleibt bis Klick weg
@@ -3103,17 +4153,37 @@ class TrayManager:
                 return
 
         def _open(icon, item):
-            self.show_main()
+            if sys.platform == "linux":
+                # AppIndicator/GTK menu callbacks fire synchronously on the
+                # same GTK main thread pywebview's own loop runs on (see the
+                # run_detached() note above). win.show()/.restore() marshal
+                # their real work back onto that same thread via
+                # GLib.idle_add and block the caller until it runs -- called
+                # straight from here, the caller *is* that thread, so it
+                # deadlocks waiting on itself. Doing the work off-thread
+                # keeps the GTK loop free to service that idle callback.
+                threading.Thread(target=self.show_main, daemon=True).start()
+            else:
+                self.show_main()
+
+        def _safe_quit():
+            try:
+                self.on_quit()
+            except Exception:
+                pass
 
         def _quit(icon, item):
             try:
                 self.icon.stop()
             except Exception:
                 pass
-            try:
-                self.on_quit()
-            except Exception:
-                pass
+            if sys.platform == "linux":
+                # Same deadlock risk as _open above -- on_quit() destroys
+                # webview windows, another call that must not run on the
+                # thread GTK is currently dispatching this signal from.
+                threading.Thread(target=_safe_quit, daemon=True).start()
+            else:
+                _safe_quit()
 
         # Beschriftung als Funktion, nicht als fester Text: pystray fragt sie
         # beim Aufklappen ab, damit stimmt das Menue sofort nach einem
@@ -3128,9 +4198,24 @@ class TrayManager:
             title="Claude Session Browser",
             menu=menu,
         )
-        self._thread = threading.Thread(target=self._run, daemon=True,
-                                        name="TrayThread")
-        self._thread.start()
+        if sys.platform == "linux":
+            # pystray's GTK/AppIndicator backend spins its own GLib main
+            # loop in run() and requires the main thread -- pywebview drives
+            # its own GTK loop from here too, and two loops fighting over
+            # the default context is a hard GLib error ("cannot acquire the
+            # default main context because it is already acquired by
+            # another thread"). run_detached() only registers the icon's
+            # callbacks on whichever loop ends up running (pywebview's, once
+            # webview.start() is called below) instead of starting a
+            # second one.
+            try:
+                self.icon.run_detached()
+            except Exception:
+                pass
+        else:
+            self._thread = threading.Thread(target=self._run, daemon=True,
+                                            name="TrayThread")
+            self._thread.start()
 
     def _run(self):
         try:
@@ -3397,6 +4482,7 @@ class Api:
             "home": HOME,
             "version": VERSION,
             "onboarding_version": ONBOARDING_VERSION,
+            "is_win": _IS_WIN,
         }
 
     # -- von JS aufgerufen --
@@ -3476,10 +4562,24 @@ class Api:
         return self._state()
 
     def copy(self, text):
+        if _IS_WIN:
+            try:
+                subprocess.run(["clip"], input=str(text), text=True, shell=True)
+                return True
+            except OSError:
+                return False
         try:
-            subprocess.run(["clip"], input=str(text), text=True, shell=True)
+            # Ueber GTK statt einem externen Tool (xclip/wl-copy/...) --
+            # pywebview laeuft hier schon auf GTK, das kann Zwischenablage
+            # direkt und braucht kein zusaetzlich installiertes Paket.
+            import gi
+            gi.require_version("Gtk", "3.0")
+            from gi.repository import Gtk, Gdk
+            clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+            clipboard.set_text(str(text), -1)
+            clipboard.store()
             return True
-        except OSError:
+        except Exception:
             return False
 
     # -- Buddy (Clawd-Maskottchen) --
@@ -3889,18 +4989,26 @@ class Api:
             save_json(SETTINGS_FILE, self.settings)
             self.buddy.start()
             time.sleep(0.4)
-        scale = max(2, min(10, int(bud.get("size", 4))))
-        # Rahmen berücksichtigen – das Fenster ist ggf. groesser als 20*scale.
-        pad = _frame_pad(_resolved_frame_style(bud), scale)
-        size_px = 20 * scale + pad["l"] + pad["r"]
         mi = int(monitor_idx) if monitor_idx is not None else None
-        nx, ny = _anchor_position(anchor, size_px, int(bud.get("x", 200)),
-                                  int(bud.get("y", 200)), mi)
-        self.buddy.jump_to(nx, ny)
-        # Optimistisch schon merken (der Buddy-Thread persistiert nochmal
-        # nach dem Snap – kann leicht abweichen, dann gewinnt der Thread).
-        bud["x"], bud["y"] = nx, ny
-        save_json(SETTINGS_FILE, self.settings)
+        if _IS_WIN:
+            scale = max(2, min(10, int(bud.get("size", 4))))
+            # Rahmen berücksichtigen – das Fenster ist ggf. groesser als 20*scale.
+            pad = _frame_pad(_resolved_frame_style(bud), scale)
+            size_px = 20 * scale + pad["l"] + pad["r"]
+            nx, ny = _anchor_position(anchor, size_px, int(bud.get("x", 200)),
+                                      int(bud.get("y", 200)), mi)
+            self.buddy.jump_to(nx, ny)
+            # Optimistisch schon merken (der Buddy-Thread persistiert nochmal
+            # nach dem Snap – kann leicht abweichen, dann gewinnt der Thread).
+            bud["x"], bud["y"] = nx, ny
+            save_json(SETTINGS_FILE, self.settings)
+        else:
+            # Monitor-Geometrie kennt auf Linux nur der GTK-Subprozess (GDK) --
+            # _anchor_position selbst kann hier nichts ausrechnen, da
+            # _win_enum_monitors/_win_monitor_work_from_point Windows-only
+            # sind. Der Subprozess rechnet und meldet die Zielposition per
+            # "moved"-Event zurueck, das ohnehin schon Settings persistiert.
+            self.buddy.jump_to_anchor(anchor, mi)
         return self.buddy_state()
 
     def buddy_place(self):
@@ -4182,7 +5290,7 @@ class Api:
         except Exception:
             return {"ok": False, "error": t("Kein Internet / Repo nicht erreichbar.")}
         page = data.get("url") or \
-            "https://github.com/juppeee/claude-session-browser/releases/latest"
+            "https://github.com/JayceTheGaymer/claude-session-browser/releases/latest"
         installer_url = data.get("installer_url") or ""
         exe_url = data.get("exe_url") or ""
 
@@ -5683,7 +6791,7 @@ async function refreshBuddyStatus(){
 async function doRefresh(btn){if(btn)btn.disabled=true; ingest(await api.refresh()); render(); updateDetail(); if(btn)btn.disabled=false;}
 async function doResume(){const s=getSel(); if(!s)return; await api.resume(s.id,s.cwd,s.project||'');}
 async function doResumeRow(id){const s=sessions.find(x=>x.id===id); if(!s)return; selected=id; render(); await api.resume(s.id,s.cwd,s.project||'');}
-async function doCopy(){const s=getSel(); if(!s)return; await api.copy(s.id); toast(t('Session-ID kopiert ✓'));}
+async function doCopy(){const s=getSel(); if(!s)return; const ok=await api.copy(s.id); toast(ok?t('Session-ID kopiert ✓'):t('Kopieren fehlgeschlagen'));}
 
 /* ---- Farbe ---- */
 function buildSwatches(){
@@ -5804,7 +6912,7 @@ async function renderBuddy(){
       <h2>${ic('clock')}Wann sichtbar</h2>
       <div class="sub">Der Buddy kann immer da sein oder nur wenn ein bestimmtes Programm gerade im Vordergrund ist – z.B. nur wenn Claude Code im Terminal läuft.</div>
       <div class="ba-vis">
-        <label class="ba-radio"><input type="radio" name="ba-vis" ${vis==='when_claude'?'checked':''} onchange="buddySet('visibility','when_claude')"> <span>Nur wenn Claude Code läuft <em class="ba-dim">(erkennt Terminal + <code>claude.exe</code>)</em></span></label>
+        <label class="ba-radio"><input type="radio" name="ba-vis" ${vis==='when_claude'?'checked':''} onchange="buddySet('visibility','when_claude')"> <span>Nur wenn Claude Code läuft</span></label>
         <label class="ba-radio"><input type="radio" name="ba-vis" ${vis==='always'?'checked':''} onchange="buddySet('visibility','always')"> <span>Immer sichtbar</span></label>
         <label class="ba-radio"><input type="radio" name="ba-vis" ${vis==='when_window'?'checked':''} onchange="buddySet('visibility','when_window')"> <span>Nur wenn dieses Fenster vorne ist:</span></label>
       </div>
@@ -6049,7 +7157,7 @@ function renderSettings(){
       <h2>${ic('globe')}${t('Sprache')}</h2>
       <div class="row2">
         <div><div class="lbl">${t('Sprache der Oberfläche')}</div>
-          <div class="desc">${t('„Automatisch" richtet sich nach Windows: deutsche Oberfläche auf deutschen Systemen, sonst Englisch.')}</div></div>
+          <div class="desc">${t('„Automatisch" richtet sich nach deinem System: deutsche Oberfläche auf deutschen Systemen, sonst Englisch.')}</div></div>
         <select class="sel-input" onchange="setLanguage(this.value)">
           <option value="auto" ${(st.language||'auto')==='auto'?'selected':''}>${t('Automatisch')}</option>
           <option value="de" ${st.language==='de'?'selected':''}>Deutsch</option>
@@ -6085,8 +7193,8 @@ function renderSettings(){
     <div class="card">
       <h2>${ic('power')}Autostart</h2>
       <div class="row2">
-        <div><div class="lbl">Mit Windows starten</div>
-          <div class="desc">Die App startet automatisch nach dem Anmelden – praktisch damit der Buddy und der Tray-Modus sofort verfügbar sind. Registry-Eintrag unter HKCU\\Run.</div></div>
+        <div><div class="lbl">Automatisch starten</div>
+          <div class="desc">Die App startet automatisch nach dem Anmelden – praktisch damit der Buddy und der Tray-Modus sofort verfügbar sind.</div></div>
         <div class="toggle ${st.autostart!==false?'on':''}" onclick="toggleAutostart(this)"></div>
       </div>
     </div>
@@ -6095,7 +7203,7 @@ function renderSettings(){
       <h2>${ic('bell')}Benachrichtigungen</h2>
       <div class="row2">
         <div><div class="lbl">Bei Limit-Reset benachrichtigen</div>
-          <div class="desc">Windows-Systembenachrichtigung wenn dein Claude-Limit sich zurückgesetzt hat und du wieder loslegen kannst. Braucht den System-Tray aktiv.</div></div>
+          <div class="desc">Systembenachrichtigung wenn dein Claude-Limit sich zurückgesetzt hat und du wieder loslegen kannst. Braucht den System-Tray aktiv.</div></div>
         <div class="toggle ${st.notify_limit_reset!==false?'on':''}" onclick="toggleLimitNotif(this)"></div>
       </div>
       <div class="row2">
@@ -6116,14 +7224,14 @@ function renderSettings(){
     <div class="secthead" id="sect-verbindungen">Verbindungen</div>
     <div class="card">
       <h2>${ic('terminal')}Terminal &amp; Claude</h2>
-      <div class="row2">
+      ${STATE.is_win ? `<div class="row2">
         <div><div class="lbl">Womit öffnen?</div><div class="desc">Wie eine Session gestartet wird.</div></div>
         <select class="sel-input" onchange="api.update_setting('terminal',this.value)">
           <option value="auto" ${st.terminal==='auto'?'selected':''}>Automatisch</option>
           <option value="wt" ${st.terminal==='wt'?'selected':''}>Windows Terminal</option>
           <option value="cmd" ${st.terminal==='cmd'?'selected':''}>Eingabeaufforderung (cmd)</option>
         </select>
-      </div>
+      </div>` : ''}
       <div class="row2">
         <div><div class="lbl">Claude-Befehl</div><div class="desc">Pfad/Name der Claude-CLI (Standard: claude).</div></div>
         <input type="text" style="max-width:260px" value="${esc(st.claude_cmd||'claude')}"
@@ -6139,7 +7247,7 @@ function renderSettings(){
 
     <div class="card">
       <h2>${ic('bluetooth')}Clawdmeter</h2>
-      <div class="sub">Schickt deine Claude-Auslastung per Bluetooth an ein Clawdmeter-Gerät. Das Gerät muss einmalig in den Windows-Bluetooth-Einstellungen gekoppelt werden.</div>
+      <div class="sub">Schickt deine Claude-Auslastung per Bluetooth an ein Clawdmeter-Gerät. Das Gerät muss einmalig über die Bluetooth-Einstellungen deines Systems gekoppelt werden.</div>
       <div class="row2">
         <div><div class="lbl">Anbindung aktiv</div><div class="desc" id="clawd-status">…</div></div>
         <div class="toggle ${st.clawdmeter?'on':''}" onclick="toggleClawd(this)"></div>
@@ -6188,11 +7296,11 @@ function renderSettings(){
       <div class="row2">
         <div><div class="lbl">Claude Session Browser</div>
           <div class="desc">Diese App – Quelltext und Releases auf GitHub.</div></div>
-        <button class="btn" onclick="api.open_url('https://github.com/juppeee/claude-session-browser')">Öffnen</button>
+        <button class="btn" onclick="api.open_url('https://github.com/JayceTheGaymer/claude-session-browser')">Öffnen</button>
       </div>
       <div class="row2">
         <div><div class="lbl">Clawdmeter</div>
-          <div class="desc">Das Gerät und seine Firmware stammen von Hermann Björgvin. Für Verbrauch und Akku reicht seine Firmware — der Session Browser bringt nur die Anbindung für Windows mit.</div></div>
+          <div class="desc">Das Gerät und seine Firmware stammen von Hermann Björgvin. Für Verbrauch und Akku reicht seine Firmware — der Session Browser bringt nur die Bluetooth-Anbindung mit.</div></div>
         <button class="btn" onclick="api.open_url('https://github.com/HermannBjorgvin/Clawdmeter')">Öffnen</button>
       </div>
       <div class="row2">
@@ -6626,7 +7734,7 @@ function obRender(){
   let dots=''; for(let i=0;i<OB_STEPS;i++) dots+=`<i class="${i===obStep?'on':''}"></i>`;
   document.getElementById('ob-dots').innerHTML=dots;
   document.getElementById('ob-back').style.visibility = obStep===0?'hidden':'visible';
-  document.getElementById('ob-next').textContent = obStep===OB_STEPS-1 ? "Los geht's! 🎉" : 'Weiter';
+  document.getElementById('ob-next').textContent = obStep===OB_STEPS-1 ? t("Los geht's! 🎉") : t('Weiter');
 }
 function obNext(){ if(obStep<OB_STEPS-1){ obStep++; obRender(); } else obFinish(); }
 function obPrev(){ if(obStep>0){ obStep--; obRender(); } }
@@ -6680,10 +7788,80 @@ def _autostart_target_exe():
     return None  # Dev-Modus: kein Autostart-Eintrag
 
 
-def set_autostart(enable):
-    """Windows-Autostart via HKCU\\...\\Run. `enable=False` entfernt Eintrag."""
-    if not _IS_WIN:
+def _linux_autostart_dir():
+    return os.path.join(
+        os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+        "autostart")
+
+
+def _linux_autostart_desktop_path():
+    return os.path.join(_linux_autostart_dir(), "claude-session-browser.desktop")
+
+
+def _linux_autostart_exec_line():
+    """Startkommando fuer den Autostart-Eintrag.
+
+    Anders als unter Windows gibt es hier keine "installierte vs.
+    Dev-Modus"-Unterscheidung (_autostart_target_exe gibt im Dev-Modus
+    bewusst None zurueck, siehe dort) -- auf Linux GIBT es noch keine
+    gepackte Alternative, aus dem venv heraus laufen IST der normale Weg,
+    das soll also auch fuer Autostart funktionieren.
+
+    WEBKIT_DISABLE_DMABUF_RENDERER=1 wird mitgesetzt, weil ein per Autostart
+    gestarteter Prozess eine frische Session-Umgebung bekommt, nicht die des
+    aktuellen Terminals -- ohne die Variable stuerzt pywebview auf manchen
+    Compositors sofort ab (siehe Plan-Doku). Auf Setups, die den Workaround
+    nicht brauchen, ist die Variable folgenlos."""
+    return ("env WEBKIT_DISABLE_DMABUF_RENDERER=1 "
+            + shlex.quote(sys.executable) + " "
+            + shlex.quote(os.path.abspath(__file__)))
+
+
+def _set_autostart_linux(enable):
+    path = _linux_autostart_desktop_path()
+    if not enable:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            return False
+        return True
+    try:
+        os.makedirs(_linux_autostart_dir(), exist_ok=True)
+        content = (
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=Claude Session Browser\n"
+            f"Exec={_linux_autostart_exec_line()}\n"
+            "Terminal=false\n"
+            "X-GNOME-Autostart-enabled=true\n")
+        with open(path, "w") as f:
+            f.write(content)
+        return True
+    except Exception:
         return False
+
+
+def _is_autostart_enabled_linux():
+    try:
+        with open(_linux_autostart_desktop_path(), "r") as f:
+            content = f.read()
+    except Exception:
+        return False
+    # X-GNOME-Autostart-enabled=false schaltet ab ohne die Datei zu loeschen
+    # (manche DE-eigenen Autostart-Manager togglen so statt zu entfernen).
+    if re.search(r"^X-GNOME-Autostart-enabled\s*=\s*false", content,
+                 re.MULTILINE | re.IGNORECASE):
+        return False
+    return True
+
+
+def set_autostart(enable):
+    """Autostart-Eintrag setzen/entfernen -- Windows-Registry (HKCU\\...\\Run)
+    oder Linux ~/.config/autostart/*.desktop, je nach Plattform."""
+    if not _IS_WIN:
+        return _set_autostart_linux(enable)
     try:
         import winreg
     except Exception:
@@ -6710,11 +7888,12 @@ def set_autostart(enable):
 
 
 def is_autostart_enabled():
-    """Liest den aktuellen Autostart-Status aus der Registry und prueft
-    dass die referenzierte .exe wirklich existiert (verwaiste Eintraege
-    werden als 'nicht aktiv' behandelt)."""
+    """Liest den aktuellen Autostart-Status aus der Registry (Windows) oder
+    aus ~/.config/autostart/*.desktop (Linux) und prueft dass der Eintrag
+    wirklich aktiv ist (verwaiste/deaktivierte Eintraege zaehlen als
+    'nicht aktiv')."""
     if not _IS_WIN:
-        return False
+        return _is_autostart_enabled_linux()
     try:
         import winreg
     except Exception:
@@ -6913,6 +8092,35 @@ _SINGLE_INSTANCE_MUTEX = "Local\\ClaudeSessionBrowser_SingleInstance_juppeee"
 _SINGLE_INSTANCE_LOCKFILE = None  # wird beim Acquire gesetzt
 
 
+def _acquire_single_instance_linux():
+    """Single-Instance-Guard fuer Linux: ein exklusiver flock() auf eine
+    Datei in $XDG_RUNTIME_DIR (faellt auf ~/.cache zurueck wenn das fehlt).
+
+    Anders als Windows' Mutex+Lockfile-Konstrukt (siehe Docstring oben) gibt
+    es hier keine Stale-Lock-Unschaerfe abzufangen: der Kernel haelt den
+    Lock exakt so lange wie der Prozess lebt und raeumt ihn beim Beenden
+    IMMER auf, auch nach einem harten Abbruch (kill -9, Crash). "Lock nicht
+    bekommen" heisst hier also unzweideutig "eine andere Instanz laeuft
+    gerade wirklich" -- der Aufrufer muss die Windows-Seitige
+    Retry-dann-trotzdem-starten-Notbremse dafuer nicht mitgehen."""
+    global _SINGLE_INSTANCE_LOCKFILE
+    try:
+        import fcntl
+        base = os.environ.get("XDG_RUNTIME_DIR") or os.path.expanduser("~/.cache")
+        os.makedirs(base, exist_ok=True)
+        lock_path = os.path.join(base, "claude-session-browser.instance.lock")
+        lf = open(lock_path, "w")
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _SINGLE_INSTANCE_LOCKFILE = lf  # Referenz halten, sonst schliesst GC den Lock
+        return True, None
+    except OSError:
+        return False, None
+    except Exception:
+        # Lock-Mechanismus kaputt (exotisches Dateisystem o.ae.) -- lieber
+        # starten lassen als den Nutzer grundlos auszusperren.
+        return True, None
+
+
 def _acquire_single_instance():
     """Doppelt gesicherter Single-Instance-Guard.
 
@@ -6927,7 +8135,7 @@ def _acquire_single_instance():
     Rueckgabe: (owned, mutex_handle). owned=False -> zweite Instanz."""
     global _SINGLE_INSTANCE_LOCKFILE
     if not _IS_WIN:
-        return True, None
+        return _acquire_single_instance_linux()
 
     # Ansatz 1: Named-Mutex
     mutex_says_first = True
@@ -7189,6 +8397,9 @@ def main():
         except Exception:
             pass
         return
+    if _BUDDY_OVERLAY_FLAG in sys.argv:
+        _buddy_overlay_main()
+        return
     if self_install():
         return  # heruntergeladene Instanz beendet sich; installierte Kopie laeuft
     try:
@@ -7202,6 +8413,17 @@ def main():
     if not owned:
         if _restore_existing_window():
             return  # bestehende Instanz wiederhergestellt -> wir sind fertig
+        if not _IS_WIN:
+            # flock() ist eindeutig: "nicht bekommen" heisst hier definitiv
+            # eine andere, gerade laufende Instanz -- kein stale Lock nach
+            # einem Crash moeglich, das raeumt der Kernel beim Prozessende
+            # immer auf (siehe _acquire_single_instance_linux). Anders als
+            # bei Windows gibt es also keine Unschaerfe, die die
+            # Retry-dann-trotzdem-starten-Notbremse unten abfangen muesste
+            # -- sauber beenden statt eine zweite Instanz aufzumachen, die
+            # sich mit der ersten um dieselbe Settings-Datei streitet.
+            print("Claude Session Browser läuft bereits.", file=sys.stderr)
+            return
         # Kein Fenster findbar - das kann passieren wenn a) eine alte
         # Instanz gerade sauber beendet wurde aber der Mutex/Lock noch
         # kurz gehalten wird, oder b) ein stale-Lock nach einem Crash

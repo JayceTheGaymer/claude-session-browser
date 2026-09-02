@@ -16,6 +16,7 @@ beim Start in die Oberflaeche, `set_lang()` liefert sie beim Umschalten neu.
 
 import ctypes
 import json
+import os
 import re
 
 # Sprachen, die es gibt. Alles andere faellt auf Englisch zurueck.
@@ -30,18 +31,40 @@ _PLACEHOLDER = re.compile(r"\{(\w+)\}")
 # --------------------------------------------------------------------------- #
 #  Systemsprache
 # --------------------------------------------------------------------------- #
-def detect_system_lang():
-    """Deutsch, wenn die Windows-Oberflaeche deutsch ist - sonst Englisch.
+def _detect_system_lang_linux():
+    """Deutsch, wenn die Linux-Locale deutsch ist - sonst Englisch.
 
-    GetUserDefaultUILanguage() liefert eine LANGID; die unteren 10 Bit sind
-    die Hauptsprache, 0x07 steht fuer Deutsch. Damit sind alle Varianten
-    abgedeckt (de-DE, de-AT, de-CH), ohne sie einzeln aufzuzaehlen.
+    POSIX-Prioritaet fuer die Meldungssprache: LANGUAGE (Doppelpunkt-
+    getrennte Prioritaetsliste, von GNOME und vielen DEs gesetzt), dann
+    LC_ALL, LC_MESSAGES, LANG (je ein einzelner Locale-String wie
+    "de_DE.UTF-8"). Der erste gesetzte gewinnt -- wie bei Windows zaehlt nur
+    die Hauptsprache, nicht die Variante (de_DE/de_AT/de_CH etc.)."""
+    for var in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"):
+        val = os.environ.get(var, "")
+        if not val:
+            continue
+        primary = val.split(":")[0].split(".")[0].split("_")[0].lower()
+        return "de" if primary == "de" else "en"
+    return "en"
+
+
+def detect_system_lang():
+    """Deutsch, wenn die Systemoberflaeche deutsch ist - sonst Englisch.
+
+    Windows: GetUserDefaultUILanguage() liefert eine LANGID; die unteren 10
+    Bit sind die Hauptsprache, 0x07 steht fuer Deutsch. Damit sind alle
+    Varianten abgedeckt (de-DE, de-AT, de-CH), ohne sie einzeln
+    aufzuzaehlen. Linux: siehe _detect_system_lang_linux.
     """
     try:
         langid = ctypes.windll.kernel32.GetUserDefaultUILanguage()
         return "de" if (langid & 0x3FF) == 0x07 else "en"
     except Exception:
-        # Kein Windows oder API nicht erreichbar: Englisch ist die
+        pass
+    try:
+        return _detect_system_lang_linux()
+    except Exception:
+        # Weder Windows noch auswertbare Linux-Locale: Englisch ist die
         # sicherere Annahme, Deutsch waere ein Sonderfall.
         return "en"
 
@@ -135,6 +158,10 @@ TRANSLATIONS = {
         "Unsicherer claude_cmd-Wert.": "Unsafe value for claude_cmd.",
         "Windows Terminal (wt) nicht gefunden.":
             "Windows Terminal (wt) not found.",
+        "Kein Terminal-Programm gefunden.":
+            "No terminal emulator found.",
+        "Terminal ließ sich nicht starten.":
+            "The terminal emulator could not be started.",
 
         # ---- Tray und Benachrichtigungen ---------------------------------
         "Öffnen": "Open",
@@ -217,9 +244,9 @@ TRANSLATIONS = {
         "Automatisch erzeugte Kurzbeschreibung der Session – oder dein selbst vergebener Name.":
             "Automatically generated short description of the session – or the name you gave it yourself.",
         "Autostart an ✓":
-            "Start with Windows on ✓",
+            "Start on boot: on ✓",
         "Autostart aus":
-            "Start with Windows off",
+            "Start on boot: off",
         "Autostart konnte nicht gesetzt werden":
             "Couldn't set startup",
         "Bei Limit-Reset benachrichtigen":
@@ -260,6 +287,8 @@ TRANSLATIONS = {
             "The working directory the session was started in.",
         "Das Gerät und seine Firmware stammen von Hermann Björgvin. Für Verbrauch und Akku reicht seine Firmware — der Session Browser bringt nur die Anbindung für Windows mit.":
             "The device and its firmware come from Hermann Björgvin. For usage and battery his firmware is all you need — the Session Browser only adds the Windows connection.",
+        "Das Gerät und seine Firmware stammen von Hermann Björgvin. Für Verbrauch und Akku reicht seine Firmware — der Session Browser bringt nur die Bluetooth-Anbindung mit.":
+            "The device and its firmware come from Hermann Björgvin. For usage and battery his firmware is all you need — the Session Browser only adds the Bluetooth connection.",
         "Clawdmeter-Firmware, Fork":
             "Clawdmeter firmware, fork",
         "Hermanns Firmware sucht sich die Animation nach Verbrauchsgeschwindigkeit aus. Damit das Gerät zeigt, was Claude gerade macht, muss dieser Fork darauf laufen — Branch csb-buddy.":
@@ -398,6 +427,10 @@ TRANSLATIONS = {
             "Pings you once when the device's battery drops below the threshold. Won't again until it's charged.",
         "Mit Windows starten":
             "Start with Windows",
+        "Automatisch starten":
+            "Start automatically",
+        "Die App startet automatisch nach dem Anmelden – praktisch damit der Buddy und der Tray-Modus sofort verfügbar sind.":
+            "The app starts automatically after you log in – handy so the buddy and tray mode are available right away.",
         "Nach Updates suchen":
             "Check for updates",
         "Nachrichten":
@@ -434,6 +467,8 @@ TRANSLATIONS = {
             "Right-click or double-click on Buddy sends him away for a bit – that doesn't turn him off. He'll be back with the next new Claude terminal.",
         "Schickt deine Claude-Auslastung per Bluetooth an ein Clawdmeter-Gerät. Das Gerät muss einmalig in den Windows-Bluetooth-Einstellungen gekoppelt werden.":
             "Sends your Claude usage over Bluetooth to a Clawdmeter device. The device needs to be paired once in Windows Bluetooth settings.",
+        "Schickt deine Claude-Auslastung per Bluetooth an ein Clawdmeter-Gerät. Das Gerät muss einmalig über die Bluetooth-Einstellungen deines Systems gekoppelt werden.":
+            "Sends your Claude usage over Bluetooth to a Clawdmeter device. The device needs to be paired once through your system's Bluetooth settings.",
         "Schnellwahl":
             "Quick pick",
         "Schwelle für die Akku-Warnung":
@@ -448,6 +483,8 @@ TRANSLATIONS = {
             "Copy session ID to clipboard",
         "Session-ID kopiert ✓":
             "Session ID copied ✓",
+        "Kopieren fehlgeschlagen":
+            "Copy failed",
         "Sessions":
             "Sessions",
         "Sessions in diesen Ordnern werden komplett ausgeblendet.":
@@ -522,6 +559,8 @@ TRANSLATIONS = {
             "Windows Terminal",
         "Windows-Systembenachrichtigung wenn dein Claude-Limit sich zurückgesetzt hat und du wieder loslegen kannst. Braucht den System-Tray aktiv.":
             "Windows system notification when your Claude limit has reset and you can get going again. Needs the system tray enabled.",
+        "Systembenachrichtigung wenn dein Claude-Limit sich zurückgesetzt hat und du wieder loslegen kannst. Braucht den System-Tray aktiv.":
+            "System notification when your Claude limit has reset and you can get going again. Needs the system tray enabled.",
         "Wird geladen…":
             "Loading…",
         "Wo Claude die Session-Dateien speichert. Wird automatisch gesucht, lässt sich aber überschreiben.":
@@ -636,7 +675,7 @@ TRANSLATIONS = {
         "Akzentfarbe": "Accent colour",
         "Hintergrund": "Background",
         "Fenster schließen": "Closing the window",
-        "Autostart": "Start with Windows",
+        "Autostart": "Start on boot",
         "Benachrichtigungen": "Notifications",
         "Terminal & Claude": "Terminal & Claude",
         "Updates": "Updates",
@@ -730,6 +769,10 @@ TRANSLATIONS = {
         "„Automatisch\" richtet sich nach Windows: deutsche Oberfläche auf "
         "deutschen Systemen, sonst Englisch.":
             "\"Automatic\" follows Windows: German on German systems, "
+            "English everywhere else.",
+        "„Automatisch\" richtet sich nach deinem System: deutsche Oberfläche auf "
+        "deutschen Systemen, sonst Englisch.":
+            "\"Automatic\" follows your system: German on German systems, "
             "English everywhere else.",
     },
 }
