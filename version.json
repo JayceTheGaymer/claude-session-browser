@@ -1,9 +1,5 @@
 {
   "version": "1.4.1",
-  "notes": "The window can no longer end up with its title bar above the top of the screen. A remembered position was only checked for a scrap of overlap with any monitor, so a window sitting a little too high passed the check and the close button was off screen. A size remembered from a larger monitor or a different display scaling had the same effect. The window is now fitted to the work area when it opens and when it is brought back from the tray.",
-  "url": "https://github.com/JayceTheGaymer/claude-session-browser/releases/latest",
-  "exe_url": "https://github.com/JayceTheGaymer/claude-session-browser/releases/latest/download/ClaudeSessionBrowser.exe",
-  "installer_url": "https://github.com/JayceTheGaymer/claude-session-browser/releases/latest/download/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "04a69299f9bdb7e79f4182a3d8552a3be7df225ce19e8dc048e03509922921a0",
-  "sha256": "eaf983868e2a24f66c079b9a9e1728b074e84907d64017fb20eed3b34cf06f5d"
+  "notes": "Linux port based on upstream v1.4.1 (juppeee/claude-session-browser). Adds full Linux support: native session resume, working tray icon, single-instance lock, autostart, locale detection, Clawdmeter Bluetooth discovery, and a full rewrite of the Clawd desktop buddy (GTK/Cairo instead of Tk, since Tk has no Linux equivalent to Windows' transparency mechanism) with all the same features -- dragging, hover, frame styles, placement mode. Distributed as an AppImage; see PREREQUISITES.md for the small list of system packages it relies on (GTK3, WebKitGTK, PyGObject, and a few others) rather than bundling everything.",
+  "url": "https://github.com/JayceTheGaymer/claude-session-browser/releases/latest"
 }

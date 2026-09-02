@@ -1,0 +1,30 @@
+#!/bin/bash
+# AppImage entry point. Bundles pywebview + pystray (pure Python, safe
+# regardless of the host's Python version); everything else -- GTK3,
+# WebKitGTK, PyGObject, pycairo, python-xlib, Pillow, dbus-fast -- comes
+# from the host system. See PREREQUISITES.md for why those specifically
+# can't be safely bundled, and what to install.
+set -e
+
+HERE="${APPDIR:-$(dirname "$(readlink -f "${0}")")}"
+APP_SHARE="${HERE}/usr/share/claude-session-browser"
+
+export PYTHONPATH="${APP_SHARE}/vendor${PYTHONPATH:+:${PYTHONPATH}}"
+export WEBKIT_DISABLE_DMABUF_RENDERER=1
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "Claude Session Browser needs python3 installed on your system." >&2
+    exit 1
+fi
+
+missing=""
+for mod in gi cairo Xlib PIL; do
+    python3 -c "import ${mod}" >/dev/null 2>&1 || missing="${missing} ${mod}"
+done
+if [ -n "${missing}" ]; then
+    echo "Claude Session Browser is missing required system packages (Python modules:${missing})." >&2
+    echo "See PREREQUISITES.md in the source repo for what to install." >&2
+    exit 1
+fi
+
+exec python3 "${APP_SHARE}/claude_sessions.py" "$@"

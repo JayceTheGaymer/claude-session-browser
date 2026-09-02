@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Claude Session Browser
+Comment=Browse and resume your local Claude Code sessions
+Exec=AppRun %U
+Icon=claude-session-browser
+Categories=Development;
+Terminal=false
+StartupNotify=true

@@ -170,9 +170,34 @@ _HOOK_MARKE = "--csb-hook"
 # Buddy (nur Linux -- siehe BuddyController._run_linux fuer das Warum).
 _BUDDY_OVERLAY_FLAG = "--csb-buddy-overlay"
 
+# Wie _BUDDY_OVERLAY_FLAG, nur fuer die Limit-Reset-Karte (LimitResetToast).
+# Gleicher Grund: Tks -transparentcolor hat kein Linux-Aequivalent.
+_RESET_TOAST_FLAG = "--csb-reset-toast"
+
+
+def _linux_reinvoke_command(*extra_args):
+    """Shell-Kommandozeile, um diese App spaeter (nach Prozessende!) erneut
+    aufzurufen -- fuer alles, was WIR JETZT in eine Datei schreiben, die
+    SPAETER von aussen ausgefuehrt wird (Autostart-Eintrag, Claude-Code-
+    Hook-Kommando). sys.executable+__file__ taugt dafuer nicht, wenn wir aus
+    einem AppImage heraus laufen: __file__ zeigt dann auf den
+    Squashfs-Mountpunkt (/tmp/.mount_XXXXXX/...), der verschwindet sobald
+    DIESER Prozess beendet wird -- ein spaeterer Aufruf liefe ins Leere.
+    $APPIMAGE zeigt stattdessen auf die bestehen bleibende .AppImage-Datei
+    selbst, extra fuer genau diesen Zweck von der AppImage-Runtime gesetzt.
+    Fuer aus dem Buddy-/Toast-Subprozess heraus gebrauchte Selbstaufrufe
+    (waehrend DIESER Prozess noch laeuft, der Mount also noch existiert)
+    ist das nicht noetig -- die spawnen weiterhin direkt ueber __file__."""
+    appimage = os.environ.get("APPIMAGE")
+    parts = [appimage] if appimage else [sys.executable, os.path.abspath(__file__)]
+    parts.extend(extra_args)
+    return " ".join(shlex.quote(p) for p in parts)
+
 
 def _hook_command():
     """Der Befehl, den Claude Code aufrufen soll."""
+    if not _IS_WIN:
+        return _linux_reinvoke_command(_HOOK_MARKE)
     if getattr(sys, "frozen", False):
         return '"%s" %s' % (sys.executable, _HOOK_MARKE)
     return '"%s" "%s" %s' % (sys.executable,
@@ -3905,6 +3930,221 @@ def _dodge_y(x, y, w, h, avoid, screen_h, gap=14, margin=8):
     return y
 
 
+# --------------------------------------------------------------------------- #
+#  Limit-Reset-Karte fuer Linux -- eigener Subprozess, siehe
+#  BuddyController._run_linux fuer das ausfuehrliche Warum (Tk hat auf
+#  Linux kein Aequivalent zu -transparentcolor; GTK per Cairo schon, aber
+#  nur ueber XWayland). Anders als der Buddy braucht diese Karte keine
+#  laufende IPC-Verbindung zum Elternprozess -- sie ist ein reines
+#  Fire-and-forget-Fenster: Titel/Untertitel/Ausweich-Rechteck kommen als
+#  argv mit, die Karte faehrt ihre Slide-in-/Hover-/Fade-out-Animation
+#  selbststaendig und beendet sich beim Klick von selbst.
+# --------------------------------------------------------------------------- #
+def _reset_toast_main():
+    import math
+    import cairo
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib, Gdk
+
+    argv = sys.argv[sys.argv.index(_RESET_TOAST_FLAG) + 1:]
+    title = argv[0] if len(argv) > 0 else "Dein Claude-Limit ist zurückgesetzt"
+    subtitle = argv[1] if len(argv) > 1 else "Du kannst weitermachen"
+    avoid = None
+    if len(argv) >= 6:
+        try:
+            ax, ay, aw, ah = (int(argv[2]), int(argv[3]),
+                             int(argv[4]), int(argv[5]))
+            if aw > 0 and ah > 0:
+                avoid = (ax, ay, aw, ah)
+        except ValueError:
+            avoid = None
+
+    CARD = "#f5f2eb"
+    CARD_HOVER = "#efeadf"
+    ACCENT = "#d97757"
+    ACCENT_SOFT = "#e8a889"
+    TITLE_COL = "#1a1815"
+    SUBTLE = "#6b6660"
+    CLOSE = "#8a857f"
+    CLOSE_HOVER = "#1a1815"
+
+    def hexrgba(hexcol, a=1.0):
+        c = hexcol.lstrip("#")
+        return (int(c[0:2], 16) / 255.0, int(c[2:4], 16) / 255.0,
+                int(c[4:6], 16) / 255.0, a)
+
+    W, H = 300, 78
+
+    win = Gtk.Window(type=Gtk.WindowType.POPUP)
+    win.set_decorated(False)
+    win.set_keep_above(True)
+    win.set_resizable(False)
+    win.set_skip_taskbar_hint(True)
+    win.set_skip_pager_hint(True)
+    win.set_accept_focus(False)
+    win.add_events(Gdk.EventMask.BUTTON_PRESS_MASK
+                   | Gdk.EventMask.ENTER_NOTIFY_MASK
+                   | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+    screen = win.get_screen()
+    visual = screen.get_rgba_visual()
+    if visual is not None:
+        win.set_visual(visual)
+    win.set_app_paintable(True)
+
+    # Auf dem Arbeitsbereich des PRIMAeren Monitors positionieren, nicht auf
+    # der kombinierten virtuellen Flaeche ueber alle Monitore -- sonst landet
+    # die Karte je nach Monitor-Anordnung auf dem falschen Bildschirm oder
+    # haengt genau auf der Grenze zwischen zwei Monitoren (halb abgeschnitten).
+    display = Gdk.Display.get_default()
+    mon = display.get_primary_monitor() or display.get_monitor(0)
+    wa = mon.get_workarea()
+    mx, my, mw, mh = wa.x, wa.y, wa.width, wa.height
+    target_x = mx + mw - W - 28
+    target_y = _dodge_y(target_x, my + 40, W, H, avoid, my + mh)
+
+    state = {"hover": False, "closing": False}
+
+    def rounded_rect_path(cr, x, y, w, h, r):
+        cr.new_sub_path()
+        cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+        cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+        cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+        cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
+        cr.close_path()
+
+    def on_draw(widget, cr):
+        # GTK clippt den hier uebergebenen Context auf die Region, die es
+        # gerade neu zeichnen will -- moeglicherweise nur ein Teilbereich,
+        # falls der allererste Expose (unter XWayland/RGBA-Visual) nicht
+        # das ganze Fenster abdeckt. Da spaetere Deckkraft-Aenderungen kein
+        # queue_draw() ausloesen, kaeme so ein Teilbereich nie nach -- daher
+        # den Clip explizit aufheben, bevor irgendwas gezeichnet wird.
+        cr.reset_clip()
+        cr.save()
+        cr.set_source_rgba(0, 0, 0, 0)
+        cr.set_operator(cairo.OPERATOR_SOURCE)
+        cr.paint()
+        cr.restore()
+        cr.set_operator(cairo.OPERATOR_OVER)
+
+        rounded_rect_path(cr, 0, 0, W, H, 12)
+        cr.set_source_rgba(*hexrgba(CARD_HOVER if state["hover"] else CARD))
+        cr.fill()
+
+        cx, cy = 24, H // 2
+        cr.arc(cx, cy, 9, 0, 2 * math.pi)
+        cr.set_source_rgba(*hexrgba(ACCENT_SOFT))
+        cr.fill()
+        cr.arc(cx, cy, 5, 0, 2 * math.pi)
+        cr.set_source_rgba(*hexrgba(ACCENT))
+        cr.fill()
+
+        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(13)
+        cr.set_source_rgba(*hexrgba(TITLE_COL))
+        cr.move_to(44, 30)
+        cr.show_text(title)
+
+        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
+        cr.set_font_size(11)
+        cr.set_source_rgba(*hexrgba(SUBTLE))
+        cr.move_to(44, 51)
+        cr.show_text(subtitle)
+
+        cr.set_font_size(12)
+        cr.set_source_rgba(*hexrgba(CLOSE_HOVER if state["hover"] else CLOSE))
+        cr.move_to(W - 20, 16)
+        cr.show_text("✕")
+        return False
+
+    win.connect("draw", on_draw)
+
+    def on_enter(widget, event):
+        state["hover"] = True
+        win.queue_draw()
+        return True
+
+    def on_leave(widget, event):
+        state["hover"] = False
+        win.queue_draw()
+        return True
+
+    def do_close(*_a):
+        if state["closing"]:
+            return True
+        state["closing"] = True
+
+        def fade_step(step):
+            if step <= 0:
+                Gtk.main_quit()
+                return False
+            win.set_opacity(step / 10.0)
+            GLib.timeout_add(20, fade_step, step - 1)
+            return False
+
+        fade_step(10)
+        return True
+
+    win.connect("enter-notify-event", on_enter)
+    win.connect("leave-notify-event", on_leave)
+    win.connect("button-press-event", do_close)
+
+    # Kein Slide-in von "ausserhalb" des Monitors: die Original-Animation
+    # ging von einem virtuellen Windows-Desktop aus, wo rechts vom Monitor
+    # tatsaechlich freier Raum liegt. In einem Multi-Monitor-Layout sitzt
+    # dort haeufig ein weiterer, an den primaeren angrenzender Monitor --
+    # "off-screen starten und reinschieben" landet dann fuer die ersten
+    # Frames auf dem falschen Monitor bzw. auf der Grenze zwischen beiden
+    # (genau das reproduziert und bestaetigt: erst per Hardcoded-Testfenster
+    # verifiziert dass Positionierung an sich stimmt, dann diesen Fall
+    # gefunden). Reine Ueberblendung an der Zielposition ist ebenso als
+    # Eingangsanimation lesbar und kommt ohne diese Annahme aus.
+    # set_default_size(), nicht resize(): resize() aendert die Groesse eines
+    # bereits gemappten Fensters, hat aber vor der ersten Realisierung nicht
+    # zuverlaessig gegriffen (Fenster kam als 200x200 statt WxH raus -- der
+    # GTK-Default, wenn keine Groesse rechtzeitig gesetzt wurde).
+    # set_default_size() ist die korrekte API fuer die Startgroesse.
+    win.set_default_size(W, H)
+    win.move(target_x, target_y)
+    win.set_opacity(0.0)
+    win.show_all()
+
+    # Override-redirect (POPUP) heisst: kein WM verwaltet dieses Fenster,
+    # also setzt auch niemand das "immer oben"-State-Hint fuer uns durch --
+    # anders als bei einem gemanagten Fenster ist keep_above hier reine
+    # Absicht ohne Durchsetzung. Die Stapelreihenfolge folgt stattdessen
+    # schlicht "wer zuletzt gehoben/gemappt wurde" -- ein Fenster, das kurz
+    # nach dem Erscheinen der Karte Fokus bekommt (z.B. ein Browser), kann
+    # sie dadurch teilweise ueberdecken. Einmal sofort und einmal kurz
+    # danach erneut nach vorn holen faengt genau dieses Rennen ab.
+    def _raise_now():
+        try:
+            win.get_window().raise_()
+        except Exception:
+            pass
+        return False
+
+    _raise_now()
+    GLib.timeout_add(150, _raise_now)
+
+    try:
+        Gdk.beep()
+    except Exception:
+        pass
+
+    anim = {"step": 0, "steps": 14}
+
+    def fade_in():
+        anim["step"] += 1
+        win.set_opacity(min(1.0, anim["step"] / anim["steps"]))
+        return anim["step"] < anim["steps"]
+
+    GLib.timeout_add(16, fade_in)
+
+    Gtk.main()
+
+
 class LimitResetToast:
     """Zeigt eine Anthropic-Style-Karte oben rechts am Bildschirm die den User
     darueber informiert dass sein Claude-Limit zurueckgesetzt wurde. Karte
@@ -3936,6 +4176,9 @@ class LimitResetToast:
         if self._alive:
             return
         self._alive = True
+        if not _IS_WIN:
+            self._show_linux(title, subtitle, avoid)
+            return
         self._t = threading.Thread(
             target=self._run, args=(title, subtitle, avoid), daemon=True)
         self._t.start()
@@ -3944,6 +4187,35 @@ class LimitResetToast:
             winsound.MessageBeep(winsound.MB_ICONASTERISK)
         except Exception:
             pass
+
+    def _show_linux(self, title, subtitle, avoid):
+        """Startet die Karte als eigenen GTK-Subprozess (siehe
+        _reset_toast_main). Fire-and-forget -- die Karte faehrt ihre eigene
+        Animation und beendet sich beim Klick von selbst; hier wird nur ihr
+        Lebenszyklus verfolgt, damit self._alive wieder False wird (sonst
+        wuerde eine zweite Meldung sich fuer immer selbst blockieren, siehe
+        die if self._alive-Sperre oben)."""
+        try:
+            env = os.environ.copy()
+            env["GDK_BACKEND"] = "x11"
+            ax, ay, aw, ah = avoid or (0, 0, 0, 0)
+            proc = subprocess.Popen(
+                [sys.executable, os.path.abspath(__file__), _RESET_TOAST_FLAG,
+                 title, subtitle, str(int(ax)), str(int(ay)),
+                 str(int(aw)), str(int(ah))],
+                env=env)
+        except Exception:
+            self._alive = False
+            return
+
+        def _wait():
+            try:
+                proc.wait()
+            except Exception:
+                pass
+            self._alive = False
+
+        threading.Thread(target=_wait, daemon=True).start()
 
     def _rounded_rect(self, cv, x1, y1, x2, y2, r, fill, outline=""):
         """Zeichnet ein Rechteck mit runden Ecken auf einen Canvas."""
@@ -4473,6 +4745,22 @@ class Api:
         return self._cache
 
     def _state(self, force=False):
+        # Linux registriert Autostart nur ueber den manuellen Settings-Toggle
+        # (siehe set_autostart) -- anders als unter Windows greift beim ersten
+        # Start kein automatisches Eintragen, das auch den True-Standardwert
+        # in DEFAULT_SETTINGS einloesen wuerde (das ist bewusst so, siehe
+        # Plan-Doku). Der Toggle wuerde also faelschlich "an" zeigen, obwohl
+        # nichts eingetragen ist -- den gespeicherten Wert hier durch die
+        # tatsaechliche Registrierung ersetzen behebt das an der Wurzel,
+        # ohne den (von Windows mitbenutzten) Standardwert selbst anzufassen.
+        if not _IS_WIN:
+            real = is_autostart_enabled()
+            if self.settings.get("autostart") != real:
+                self.settings["autostart"] = real
+                try:
+                    save_json(SETTINGS_FILE, self.settings)
+                except Exception:
+                    pass
         pdir = self._projects_dir()
         return {
             "sessions": self._sessions(force),
@@ -7801,20 +8089,19 @@ def _linux_autostart_desktop_path():
 def _linux_autostart_exec_line():
     """Startkommando fuer den Autostart-Eintrag.
 
-    Anders als unter Windows gibt es hier keine "installierte vs.
-    Dev-Modus"-Unterscheidung (_autostart_target_exe gibt im Dev-Modus
-    bewusst None zurueck, siehe dort) -- auf Linux GIBT es noch keine
-    gepackte Alternative, aus dem venv heraus laufen IST der normale Weg,
-    das soll also auch fuer Autostart funktionieren.
+    Ob das auf venv+Skript oder eine AppImage zeigt, entscheidet
+    _linux_reinvoke_command anhand von $APPIMAGE (siehe dort fuer das
+    Warum -- das ist derselbe Stolperstein wie beim Claude-Code-Hook-
+    Kommando: __file__ zeigt in einer AppImage auf einen Mountpunkt, der
+    nach Prozessende verschwindet, und ein Autostart-Eintrag wird ja
+    erst NACH diesem Prozess wieder aufgerufen).
 
     WEBKIT_DISABLE_DMABUF_RENDERER=1 wird mitgesetzt, weil ein per Autostart
     gestarteter Prozess eine frische Session-Umgebung bekommt, nicht die des
     aktuellen Terminals -- ohne die Variable stuerzt pywebview auf manchen
     Compositors sofort ab (siehe Plan-Doku). Auf Setups, die den Workaround
     nicht brauchen, ist die Variable folgenlos."""
-    return ("env WEBKIT_DISABLE_DMABUF_RENDERER=1 "
-            + shlex.quote(sys.executable) + " "
-            + shlex.quote(os.path.abspath(__file__)))
+    return "env WEBKIT_DISABLE_DMABUF_RENDERER=1 " + _linux_reinvoke_command()
 
 
 def _set_autostart_linux(enable):
@@ -8399,6 +8686,9 @@ def main():
         return
     if _BUDDY_OVERLAY_FLAG in sys.argv:
         _buddy_overlay_main()
+        return
+    if _RESET_TOAST_FLAG in sys.argv:
+        _reset_toast_main()
         return
     if self_install():
         return  # heruntergeladene Instanz beendet sich; installierte Kopie laeuft
