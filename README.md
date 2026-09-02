@@ -4,17 +4,19 @@
 
 # Claude Session Browser
 
-[![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078d4)](https://github.com/juppeee/claude-session-browser/releases/latest)
-[![Python](https://img.shields.io/badge/Python-3.11-3776ab)](https://www.python.org/)
-[![UI](https://img.shields.io/badge/UI-pywebview%20%2B%20WebView2-ec7456)](https://pywebview.flowrl.com/)
+*A port of Claude Session Browser to Linux, created with the assistance of Claude.*
+
+[![Linux](https://img.shields.io/badge/Linux-x86__64-333333?logo=linux&logoColor=white)](https://github.com/JayceTheGaymer/claude-session-browser/releases/latest)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab)](https://www.python.org/)
+[![UI](https://img.shields.io/badge/UI-pywebview%20%2B%20WebKitGTK-ec7456)](https://pywebview.flowrl.com/)
 [![License](https://img.shields.io/badge/License-MIT-3ecf8e)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/juppeee/claude-session-browser?color=ffb454)](https://github.com/juppeee/claude-session-browser/releases/latest)
+[![Release](https://img.shields.io/github/v/release/JayceTheGaymer/claude-session-browser?color=ffb454)](https://github.com/JayceTheGaymer/claude-session-browser/releases/latest)
 
 **Every Claude Code session you ever started, in one window — search them, and double-click one to jump straight back in.**
 
-<a href="https://github.com/juppeee/claude-session-browser/releases/latest/download/ClaudeSessionBrowser-Setup.exe"><img src="https://img.shields.io/badge/Download-Installer%20for%20Windows-ec7456?style=for-the-badge&logo=windows&logoColor=white" alt="Download the installer for Windows"></a>
+<a href="https://github.com/JayceTheGaymer/claude-session-browser/releases/latest/download/ClaudeSessionBrowser-x86_64.AppImage"><img src="https://img.shields.io/badge/Download-AppImage%20for%20Linux-ec7456?style=for-the-badge&logo=linux&logoColor=white" alt="Download the AppImage for Linux"></a>
 
-<sub>Installs per user — no admin rights, no UAC prompt, and it never touches `~/.claude`</sub>
+<sub>Needs a handful of system packages most desktop Linux installs already have — see <a href="packaging/linux/PREREQUISITES.md">Prerequisites</a></sub>
 
 [Quick start](#quick-start) · [What you get](#what-you-get) · [Clawd](#clawd-your-desktop-buddy) · [Clawdmeter](#clawdmeter) · [Settings](#settings) · [Uninstall](#updating-and-uninstalling) · [Credits](#credits)
 
@@ -40,56 +42,78 @@ and puts you back into one with a double-click.
 - **Every session in one list** — Claude's auto-title or your own, folder, message count, last activity
 - **Find it fast** — live search across title, folder, ID and first question; sortable, configurable columns
 - **Make it yours** — colour-code sessions, rename them for good, copy the ID
-- **One click back in** — opens Windows Terminal or `cmd` with the session resumed
+- **One click back in** — opens your terminal (auto-detected — kitty, GNOME Terminal, Konsole, and most others work without any setup) with the session resumed
 - **Know where your quota stands** — 5-hour and weekly usage with a live countdown to the reset
 - **Get told, not surprised** — a heads-up before the limit is full, and a notification when it resets
 - **[Clawd](#clawd-your-desktop-buddy)** — a 20×20 pixel buddy on your desktop who acts out what Claude is doing
 - **[Clawdmeter](#clawdmeter) support** — mirror Clawd onto a real device over Bluetooth
-- **German and English**, following your Windows language
+- **German and English**, following your system language
 - **Updates itself** from GitHub
 
 ## Quick start
 
-**[⬇ Download ClaudeSessionBrowser-Setup.exe](https://github.com/juppeee/claude-session-browser/releases/latest/download/ClaudeSessionBrowser-Setup.exe)** and run it. That's the whole installation.
+**(Recommended)**
+**[⬇ Download the AppImage](https://github.com/JayceTheGaymer/claude-session-browser/releases/latest/download/ClaudeSessionBrowser-x86_64.AppImage)**, and hand it to an AppImage integration tool (Shelly, AppImageLauncher, Gear
+Lever, and similar all work) for a proper entry in your applications menu.
 
-It installs per user, so **no admin rights and no UAC prompt**, and it never
-touches `~/.claude` — your sessions and settings are none of the installer's
-business. The app starts by itself when the installer finishes.
+> **First launch:** the AppImage bundles the app itself but relies on your
+> system for GTK3, WebKitGTK, PyGObject, and a few other pieces that can't be
+> portably bundled (they bind to native libraries, or ship compiled
+> extensions tied to a specific Python version). Most desktop Linux installs
+> already have them. See [**Prerequisites**](packaging/linux/PREREQUISITES.md)
+> for the exact list and your distro's install command.
 
-> **First launch:** Windows may show a SmartScreen warning ("unknown publisher")
-> because the app isn't code-signed. Click **More info → Run anyway**. It won't
-> ask again — the installed copy carries no "downloaded from the web" mark.
+Or
+
+**[⬇ Download the AppImage](https://github.com/JayceTheGaymer/claude-session-browser/releases/latest/download/ClaudeSessionBrowser-x86_64.AppImage)**, make it executable, and run it:
+
+```bash
+chmod +x ClaudeSessionBrowser-x86_64.AppImage
+./ClaudeSessionBrowser-x86_64.AppImage
+```
+
+Or 
 
 <details>
 <summary><b>Run it from source instead</b></summary>
 
 ```bash
-git clone https://github.com/juppeee/claude-session-browser.git
+git clone https://github.com/JayceTheGaymer/claude-session-browser.git
 cd claude-session-browser
-pip install pywebview pystray Pillow
-python claude_sessions.py
+python3 -m venv --system-site-packages .venv
+source .venv/bin/activate
+pip install pywebview pystray Pillow bleak
+WEBKIT_DISABLE_DMABUF_RENDERER=1 python3 claude_sessions.py
 ```
 
-`pywebview` renders through the Edge WebView2 engine, which ships with Windows
-10 and 11. Bluetooth for the Clawdmeter needs one more package:
+`pywebview` renders through WebKitGTK, which is why the venv needs
+`--system-site-packages` — it lets Python see the system's GTK/WebKitGTK
+bindings instead of trying to pip-install them, which isn't really possible
+since they bind to native libraries rather than being ordinary packages. See
+[Prerequisites](packaging/linux/PREREQUISITES.md) for the full system
+package list either way.
 
-```bash
-pip install bleak
-```
+`WEBKIT_DISABLE_DMABUF_RENDERER=1` works around a rendering crash some
+compositors hit with WebKitGTK's default renderer ("Error 71 (Protocol
+error) dispatching to Wayland display") — harmless to set even if your setup
+doesn't need it.
 
 </details>
 
 <details>
-<summary><b>Build your own installer</b></summary>
+<summary><b>Build your own AppImage</b></summary>
 
 ```bash
-pip install pyinstaller
-winget install JRSoftware.InnoSetup
-build.bat
+./packaging/linux/build-appimage.sh
 ```
 
-Three files land in `dist\`: the installer, a standalone one-file exe, and the
-separate updater.
+Needs `appimagetool` on `PATH` (AUR: `appimagetool-bin`) and the same system
+prerequisites as running from source. Bundles `pywebview` and `pystray`;
+everything else stays a host dependency — see the header comment in
+`build-appimage.sh` for why (short version: GTK/WebKitGTK can't be bundled
+portably at all, and a couple of other dependencies ship compiled
+extensions tied to a specific Python version that a single bundled build
+can't safely guarantee will match an arbitrary host).
 
 </details>
 
@@ -137,9 +161,9 @@ sessions you start afterwards.
 
 The [Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter) is a small ESP32
 device by [Hermann Björgvin](https://github.com/HermannBjorgvin) that displays
-your Claude usage. This app speaks to it over Bluetooth on Windows and can
-mirror Clawd onto it, so the device acts out the same state your desktop buddy
-does, rather than only reacting to how fast your quota is burning. It reports
+your Claude usage. This app speaks to it over Bluetooth and can mirror Clawd
+onto it, so the device acts out the same state your desktop buddy does,
+rather than only reacting to how fast your quota is burning. It reports
 its battery level back, and warns you before it runs flat.
 
 <div align="center">
@@ -150,7 +174,8 @@ its battery level back, and warns you before it runs flat.
 
 </div>
 
-Pair the device once in the Windows Bluetooth settings, then enable it under
+Pair the device once through your system's Bluetooth settings (or
+`bluetoothctl pair <MAC>` from a terminal), then enable it under
 **Settings → Connections**.
 
 **Stock firmware is enough for most of it.** Usage and battery need nothing
@@ -178,12 +203,11 @@ See [Credits](#credits) for who built what.
 
 | Setting | Default | What it does |
 |---|---|---|
-| Language | Automatic | German on German Windows, English everywhere else |
-| Open with | Automatic | Windows Terminal, or `cmd` if that's missing |
+| Language | Automatic | German on German systems, English everywhere else |
 | Claude command | `claude` | Path or name of the Claude CLI |
 | Keep running in background | On | The X button hides the app in the system tray |
-| Start with Windows | On | Registry entry under `HKCU\Run` |
-| Notify on limit reset | On | A Windows notification when your quota is back |
+| Start on boot | Off | `.desktop` entry in `~/.config/autostart/` |
+| Notify on limit reset | On | A system notification when your quota is back |
 | Warn before the limit is full | On, at 90% | Once per 5-hour window |
 | Clawdmeter battery warning | On, at 15% | Once per discharge |
 
@@ -225,30 +249,34 @@ missing translation shows German rather than an empty label.
 `tools/check_i18n.py` verifies every string has an English version and that
 placeholders match on both sides; it runs as the first step of every build.
 
-</details>
-
-<details>
-<summary><b>Publishing a release</b> (maintainer)</summary>
-
-1. Raise `VERSION` in `claude_sessions.py`
-2. Run `build.bat` and attach the installer and the one-file exe to a GitHub release
-3. Update `version.json` with the same version and a short note, then push
-
-The app compares its own `VERSION` against `version.json` in this repo on start.
+The desktop buddy and the limit-reset card render through a small GTK/Cairo
+subprocess rather than Tk — Tk has no Linux equivalent to the transparency
+mechanism Windows uses for these, so a separate renderer (forced through
+XWayland via `GDK_BACKEND=x11`) handles the actual window. The main process
+still owns all the state and activity logic; the subprocess is a thin
+renderer that just draws whatever it's told and reports drag/dismiss/hover
+events back.
 
 </details>
 
 ## Updating and uninstalling
 
-The app checks GitHub for updates by itself and offers to install them. No
-internet, no problem — the check is skipped silently.
+The app checks GitHub for updates by itself and offers to open the release
+page when a newer one is out. No internet, no problem — the check is skipped
+silently.
 
-To remove it: **Settings → Apps → Claude Session Browser → Uninstall**. Your
-sessions, titles and settings under `~/.claude` survive. Delete
+To remove it: delete the AppImage, and remove whatever applications-menu
+entry your AppImage integration tool created for it. Your sessions, titles
+and settings under `~/.claude` survive either way — delete
 `session_browser_settings.json` and `session_titles.json` by hand if you want
 those gone too.
 
 ## Credits
+
+**Claude Session Browser is [juppeee](https://github.com/juppeee)'s project.**
+The session list, the Clawd buddy, the Clawdmeter integration, and the large
+majority of the code are all his — this fork's job was porting the
+Windows-only original to run natively on Linux, not reinventing it.
 
 **The Clawdmeter is not this project's work.** The device and its firmware are the work of [Hermann Björgvin](https://github.com/HermannBjorgvin/Clawdmeter) — the hardware abstraction, five board ports, the LVGL interface, the BLE service and the animation engine are all his.
 
@@ -256,7 +284,7 @@ Talking to it is one feature of this app among many. The Session Browser is firs
 
 **Clawd himself** comes from [claudepix](https://claudepix.vercel.app) by [@amaanbuilds](https://x.com/amaanbuilds), a library of pixel-art Clawd sprites — the same source Hermann's firmware draws on. Some of the animations here were taken from there, others inspired by it, and nearly all have been reworked or redrawn since. Go and have a look, it's where Clawd got his face.
 
-What this project adds on top of Hermann's work is two things: the Bluetooth connection for Windows (his daemon is a Linux shell script built on bluez), and **activity-driven animations**. Upstream picks an animation from how fast your quota is burning — a rate measured over a six-sample ring buffer and grouped into calm / normal / active / heavy. It cannot know *what* Claude is doing. The Session Browser reads the session transcripts, works out the actual state — thinking, writing code, waiting for permission, out of quota — and tells the device which animation to show. Turn that off and the device falls back to Hermann's usage groups.
+What juppeee's original project adds on top of Hermann's work is two things: a Bluetooth connection for Windows (his own daemon is a Linux shell script built on bluez), and **activity-driven animations**. Upstream picks an animation from how fast your quota is burning — a rate measured over a six-sample ring buffer and grouped into calm / normal / active / heavy. It cannot know *what* Claude is doing. The Session Browser reads the session transcripts, works out the actual state — thinking, writing code, waiting for permission, out of quota — and tells the device which animation to show. Turn that off and the device falls back to Hermann's usage groups. This fork's Bluetooth link for Linux, using [`bleak`](https://github.com/hbldh/bleak) over BlueZ, works the same way.
 
 ## License
 

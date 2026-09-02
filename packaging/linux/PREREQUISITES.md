@@ -12,13 +12,16 @@ version your system actually has:
   need to match your system's exact library versions anyway.
 - **Pillow** (`PIL`) — used for sprite/icon handling; ships compiled
   extensions tied to a specific Python ABI.
-- **dbus-fast** — used by `bleak` for the optional Clawdmeter Bluetooth
-  link; same ABI concern as Pillow. Only needed if you use a Clawdmeter.
+- **dbus-fast** — used by `bleak` for the Clawdmeter Bluetooth link; same
+  ABI concern as Pillow.
+- **`bluetoothctl`** (from `bluez-utils` on Arch) — the Clawdmeter
+  integration is a core feature of this app, not an afterthought, and its
+  device picker shells out to `bluetoothctl` for pairing and discovery.
 
 ## Arch / CachyOS
 
 ```bash
-sudo pacman -S webkit2gtk-4.1 python-gobject python-cairo python-xlib python-pillow python-dbus-fast
+sudo pacman -S webkit2gtk-4.1 python-gobject python-cairo python-xlib python-pillow python-dbus-fast bluez-utils
 ```
 
 ## Other distros
@@ -26,13 +29,11 @@ sudo pacman -S webkit2gtk-4.1 python-gobject python-cairo python-xlib python-pil
 Package names vary. Look for your distro's equivalents of:
 `webkit2gtk` (4.1 or later), `python3-gobject` (or `pygobject`),
 `python3-cairo` (or `pycairo`), `python3-xlib`, `python3-pillow`,
-`python3-dbus-fast`.
+`python3-dbus-fast`, and `bluez-utils` (or `bluez` plus its `bluetoothctl`
+CLI, sometimes packaged separately).
 
 ## Also useful, not required to launch
 
-- `bluetoothctl` (from `bluez-utils` on Arch) — needed for the Clawdmeter
-  Bluetooth device picker; the app degrades gracefully without it (you can
-  still set a device address manually).
 - A terminal emulator the app already knows about — checks `$TERMINAL` then
   falls through a list of common ones (kitty, foot, gnome-terminal, konsole,
   xfce4-terminal, tilix, terminator, alacritty, xterm, urxvt). One of these
