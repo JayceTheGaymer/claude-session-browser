@@ -1,5 +1,5 @@
 {
-  "version": "1.4.1",
-  "notes": "Linux port based on upstream v1.4.1 (juppeee/claude-session-browser). Adds full Linux support: native session resume, working tray icon, single-instance lock, autostart, locale detection, Clawdmeter Bluetooth discovery, and a full rewrite of the Clawd desktop buddy (GTK/Cairo instead of Tk, since Tk has no Linux equivalent to Windows' transparency mechanism) with all the same features -- dragging, hover, frame styles, placement mode. Distributed as an AppImage; see PREREQUISITES.md for the small list of system packages it relies on (GTK3, WebKitGTK, PyGObject, and a few others) rather than bundling everything.",
+  "version": "1.4.1.1",
+  "notes": "Linux-only patch release on top of v1.4.1 (no upstream changes ported forward yet). Fixes: desktop notifications showed \"python3\" as the app name instead of \"Clawd\" (pystray's Linux D-Bus notifier hardcodes an empty app_name; now sent via a direct D-Bus call instead); double-click/right-click dismiss on the desktop buddy did nothing while the Buddy settings tab was open (a visibility rule meant to keep him visible while you configure him was overriding an explicit dismiss on the very next tick -- fixed on both Windows and Linux, since the bug predates this port).",
   "url": "https://github.com/JayceTheGaymer/claude-session-browser/releases/latest"
 }
