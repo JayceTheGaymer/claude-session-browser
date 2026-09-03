@@ -31,6 +31,22 @@ import datetime as dt
 import subprocess
 import urllib.request
 
+if sys.platform != "win32":
+    # GDK waehlt sein Backend beim ersten GTK-Init anhand dieser Variable --
+    # muss deshalb VOR dem webview-Import gesetzt sein. Ohne das laeuft das
+    # Hauptfenster nativ unter Wayland, wo KWin (getestet: dieses Setup) das
+    # per set_icon_from_file()/set_default_icon_from_file() gesetzte
+    # Fenstericon ignoriert -- Taskleiste/Titelleiste zeigen dann GTKs
+    # generisches Default-Icon statt des App-Logos. Unter XWayland wird es
+    # korrekt uebernommen (empirisch bestaetigt: aus, mit, aus -- Icon kaputt,
+    # ok, kaputt). Gleicher Mechanismus wie schon beim Buddy-Overlay und dem
+    # Limit-Reset-Toast, dort per env= im Subprozess gesetzt; hier das
+    # Hauptfenster selbst, deshalb direkt im eigenen Prozess-Environ.
+    # Bewusst "=" statt setdefault: KDE Plasmas Wayland-Session exportiert
+    # GDK_BACKEND=wayland global fuer alle GTK-Apps (bestaetigt, kein
+    # Einzelfall) -- setdefault waere hier also immer ein No-Op gewesen.
+    os.environ["GDK_BACKEND"] = "x11"
+
 import webview
 
 import i18n
@@ -82,6 +98,18 @@ def _resource(name):
     gebaute .exe (PyInstaller entpackt nach sys._MEIPASS)."""
     base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base, name)
+
+
+def _logo_path():
+    """Pfad zu logo.png -- liegt im Quell-Checkout unter docs/, wird aber
+    fuer Builds (AppImage build-appimage.sh, PyInstaller) direkt neben das
+    Script kopiert, wo _resource() sonst als erstes sucht. Ohne diesen
+    Fallback funktioniert das Icon nur im gebauten Fall, nicht bei einem
+    Source-Checkout-Lauf."""
+    direct = _resource("logo.png")
+    if os.path.isfile(direct):
+        return direct
+    return _resource(os.path.join("docs", "logo.png"))
 
 
 def norm(p):
@@ -4455,9 +4483,9 @@ class TrayManager:
         icon_img = None
         # Reihenfolge: bevorzugt .ico (App-Icon, immer im Build), dann logo.png,
         # dann farbiges Fallback-Quadrat.
-        for candidate in ("claude_sessions.ico", "logo.png"):
+        for candidate in (_resource("claude_sessions.ico"), _logo_path()):
             try:
-                icon_img = Image.open(_resource(candidate))
+                icon_img = Image.open(candidate)
                 break
             except Exception:
                 continue
@@ -7968,7 +7996,7 @@ function openUpdateDialog(){
   document.getElementById('upd-title').textContent=t('Update auf v{neu} (aktuell v{alt})', {neu: UPD.latest, alt: UPD.current});
   document.getElementById('upd-notes').textContent=UPD.notes||t('Verbesserungen und Fehlerbehebungen.');
   const b=document.getElementById('upd-install');
-  b.disabled=false; b.textContent= UPD.frozen ? 'Jetzt installieren' : 'Zur Download-Seite';
+  b.disabled=false; b.textContent= UPD.frozen ? t('Jetzt installieren') : t('Zur Download-Seite');
   document.getElementById('overlay-update').classList.add('show');
 }
 function buildConfetti(){
@@ -8891,7 +8919,18 @@ def main():
     api._tray = tray
 
     try:
-        webview.start()
+        # webview.start(icon=...) nur GTK/QT (siehe pywebview-Docstring) --
+        # ohne das faellt GTK auf sein eigenes Default-Icon zurueck (das
+        # "W", das im Fensterrahmen auftaucht). Auf Windows kommt das Icon
+        # stattdessen aus der PyInstaller-exe selbst, deshalb hier nur fuer
+        # Linux gesetzt.
+        if _IS_WIN:
+            webview.start()
+        else:
+            try:
+                webview.start(icon=_logo_path())
+            except Exception:
+                webview.start()
     finally:
         try:
             api.buddy.stop()
