@@ -3000,18 +3000,19 @@ class BuddyController:
 
             Bewusst NICHT beendet wird der Snooze durch blosses Alt-Tabben:
             dass der Buddy nach den normalen Regeln gerade unsichtbar ist
-            heisst nicht, dass der User ihn wiederhaben will.
+            heisst nicht, dass der User ihn wiederhaben will. Ebenso NICHT
+            beendet wird er durch blosses Offenhalten des Buddy-Tabs - ein
+            expliziter Dismiss gewinnt immer, auch dort (vorher wurde ein
+            aktiver Snooze durch den offenen Tab sofort wieder geloescht,
+            wodurch Dismiss dort de facto wirkungslos war). Platzier-Modus
+            bleibt weiterhin ein Grund, den Snooze zu ueberschreiben (man muss
+            ihn sehen koennen um ihn zu ziehen).
             """
             want = _desired_visible_raw()
             snooze = state.get("snooze_keys")
             if snooze is not None:
                 keys = _claude_context_keys()
-                on_buddy_tab = (
-                    getattr(self.api, "_current_view", "") == "buddy"
-                    and self._app_window_visible())
-                if state.get("placing") or on_buddy_tab:
-                    # Buddy-Tab offen oder Platzier-Modus -> immer zeigen,
-                    # sonst sucht der User im Leeren.
+                if state.get("placing"):
                     state["snooze_keys"] = None
                     state["snooze_empty_since"] = 0.0
                 else:
@@ -3752,13 +3753,19 @@ class BuddyController:
             return True
 
         def desired_visible():
+            """Wie _desired_visible_raw, aber mit Snooze.
+
+            Ein expliziter Dismiss (Doppel-/Rechtsklick) gewinnt immer, auch
+            wenn der Buddy-Tab offen ist -- vorher wurde ein aktiver Snooze
+            durch blosses Offenhalten des Buddy-Tabs sofort wieder geloescht,
+            wodurch Dismiss dort de facto wirkungslos war. Platzier-Modus
+            bleibt weiterhin ein Grund, den Snooze zu ueberschreiben (man muss
+            ihn sehen koennen um ihn zu ziehen)."""
             want = _desired_visible_raw()
             snooze = state.get("snooze_keys")
             if snooze is not None:
                 keys = _claude_context_keys()
-                on_buddy_tab = (getattr(self.api, "_current_view", "") == "buddy"
-                                and self._app_window_visible())
-                if state.get("placing") or on_buddy_tab:
+                if state.get("placing"):
                     state["snooze_keys"] = None
                     state["snooze_empty_since"] = 0.0
                 else:
