@@ -31,7 +31,7 @@ import datetime as dt
 import subprocess
 import urllib.request
 
-if sys.platform != "win32":
+if sys.platform.startswith("linux"):
     # GDK waehlt sein Backend beim ersten GTK-Init anhand dieser Variable --
     # muss deshalb VOR dem webview-Import gesetzt sein. Ohne das laeuft das
     # Hauptfenster nativ unter Wayland, wo KWin (getestet: dieses Setup) das
@@ -42,10 +42,19 @@ if sys.platform != "win32":
     # ok, kaputt). Gleicher Mechanismus wie schon beim Buddy-Overlay und dem
     # Limit-Reset-Toast, dort per env= im Subprozess gesetzt; hier das
     # Hauptfenster selbst, deshalb direkt im eigenen Prozess-Environ.
+    #
     # Bewusst "=" statt setdefault: KDE Plasmas Wayland-Session exportiert
     # GDK_BACKEND=wayland global fuer alle GTK-Apps (bestaetigt, kein
     # Einzelfall) -- setdefault waere hier also immer ein No-Op gewesen.
-    os.environ["GDK_BACKEND"] = "x11"
+    #
+    # Und bewusst die Liste "x11,wayland" statt nur "x11": GDK probiert die
+    # Backends in dieser Reihenfolge durch. Ein hartes "x11" wuerde auf einem
+    # Wayland-System OHNE XWayland nicht etwa nur das Icon kaputt machen,
+    # sondern GTK gar nicht erst hochkommen lassen ("Gtk couldn't be
+    # initialized", verifiziert mit DISPLAY leer) -- aus einem kosmetischen
+    # Fehler wuerde ein Nicht-Start. Mit der Liste faellt GDK in dem Fall auf
+    # Wayland zurueck: Icon dann wie gehabt generisch, aber die App laeuft.
+    os.environ["GDK_BACKEND"] = "x11,wayland"
 
 import webview
 
@@ -232,10 +241,20 @@ def _linux_notify(title, message):
     Notification-Daemon (getestet: KDE) ueber die PID des Senders auf und
     zeigt den Prozessnamen -- 'python3' -- statt eines echten App-Namens.
     Deshalb hier derselbe D-Bus-Call wie in notify_dbus.py, nur mit
-    echtem app_name."""
-    import gi
-    gi.require_version("Gtk", "3.0")
+    echtem app_name -- und mit dem App-Logo als app_icon, das pystray an
+    dieser Stelle sehr wohl korrekt mitgibt (nur den Namen eben nicht).
+    Ohne das haetten die Meldungen gar kein Icon mehr: der Daemon kann aus
+    dem blossen app_name "Clawd" keins aufloesen, solange die App kein
+    installiertes Icon-Theme-Eintrag hat (AppImage/Source-Lauf: hat sie
+    nicht)."""
     from gi.repository import Gio, GLib
+    icon_path = ""
+    try:
+        p = _logo_path()
+        if os.path.isfile(p):
+            icon_path = p
+    except Exception:
+        pass
     proxy = Gio.DBusProxy.new_for_bus_sync(
         Gio.BusType.SESSION, Gio.DBusProxyFlags.NONE, None,
         "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
@@ -243,7 +262,7 @@ def _linux_notify(title, message):
     proxy.call_sync(
         "Notify",
         GLib.Variant("(susssasa{sv}i)", (
-            "Clawd", 0, "", title, message, [], {}, -1)),
+            "Clawd", 0, icon_path, title, message, [], {}, -1)),
         Gio.DBusCallFlags.NONE, -1, None)
 
 
@@ -8189,11 +8208,17 @@ def _set_autostart_linux(enable):
         return True
     try:
         os.makedirs(_linux_autostart_dir(), exist_ok=True)
+        # "%" ist in einer Exec-Zeile das Einleitungszeichen fuer Feldcodes
+        # (%f, %U, %c ...) -- ein woertliches Prozentzeichen im Pfad muss laut
+        # Desktop-Entry-Spec als "%%" geschrieben werden, sonst frisst der
+        # Launcher es samt Folgezeichen. Betrifft z.B. eine AppImage, die in
+        # einem Ordner mit "%" im Namen liegt.
+        exec_line = _linux_autostart_exec_line().replace("%", "%%")
         content = (
             "[Desktop Entry]\n"
             "Type=Application\n"
             "Name=Claude Session Browser\n"
-            f"Exec={_linux_autostart_exec_line()}\n"
+            f"Exec={exec_line}\n"
             "Terminal=false\n"
             "X-GNOME-Autostart-enabled=true\n")
         with open(path, "w") as f:
@@ -8201,6 +8226,49 @@ def _set_autostart_linux(enable):
         return True
     except Exception:
         return False
+
+
+def _autostart_exec_target_exists(content):
+    """Zeigt die Exec-Zeile des Autostart-Eintrags noch auf etwas Existierendes?
+
+    Wichtig fuer die AppImage: verschiebt oder loescht der Nutzer die
+    .AppImage-Datei, bleibt der Autostart-Eintrag liegen und zeigt ins Leere.
+    Ohne diese Pruefung meldet is_autostart_enabled() weiter True, der
+    Settings-Schalter steht also auf "an" waehrend beim naechsten Login
+    nichts startet -- genau die Sorte Settings-vs-Realitaet-Drift, die der
+    Sync in Api._state() eigentlich verhindern soll (der uebernimmt aber nur,
+    was ihm diese Funktion sagt). Windows prueft an der entsprechenden Stelle
+    dasselbe (os.path.isfile auf den Registry-Wert).
+
+    Bewusst NICHT die verwaiste Datei loeschen (anders als die
+    Windows-Variante): diese Funktion laeuft bei jedem _state()-Aufbau, und
+    ein Loeschen als Nebeneffekt eines Lesevorgangs waere dort zu ruppig. Es
+    genuegt, False zu melden -- schaltet der Nutzer den Schalter wieder ein,
+    schreibt _set_autostart_linux die Datei ohnehin mit gueltigem Pfad neu."""
+    m = re.search(r"^Exec\s*=\s*(.+)$", content, re.MULTILINE)
+    if not m:
+        return False
+    # Gegenstueck zum "%%"-Escaping beim Schreiben (siehe
+    # _set_autostart_linux) -- sonst suchten wir nach einem Pfad, in dem
+    # jedes Prozentzeichen doppelt vorkommt.
+    try:
+        argv = shlex.split(m.group(1).replace("%%", "%"))
+    except ValueError:
+        return False
+    # "env VAR=wert ... /pfad/zum/programm" -- env und die Zuweisungen
+    # ueberspringen, das erste echte Argument ist das Programm.
+    i = 0
+    if i < len(argv) and os.path.basename(argv[i]) == "env":
+        i += 1
+        while i < len(argv) and "=" in argv[i] and not argv[i].startswith("/"):
+            i += 1
+    if i >= len(argv):
+        return False
+    prog = argv[i]
+    if "/" in prog:
+        return os.path.isfile(prog)
+    # Blosser Programmname (kein Pfad) -- ueber PATH aufloesen.
+    return shutil.which(prog) is not None
 
 
 def _is_autostart_enabled_linux():
@@ -8214,7 +8282,7 @@ def _is_autostart_enabled_linux():
     if re.search(r"^X-GNOME-Autostart-enabled\s*=\s*false", content,
                  re.MULTILINE | re.IGNORECASE):
         return False
-    return True
+    return _autostart_exec_target_exists(content)
 
 
 def set_autostart(enable):

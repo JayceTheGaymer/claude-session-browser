@@ -14,7 +14,7 @@ Protokoll (aus der Clawdmeter-Firmware):
 Das Geraet muss einmalig gekoppelt werden (es ist zugleich eine
 BLE-HID-Tastatur) -- unter Windows ueber die Bluetooth-Einstellungen, unter
 Linux z.B. per `bluetoothctl pair <MAC>`. Danach findet dieses Modul die
-Adresse selbst (Windows: PnP-Tabelle, Linux: `bluetoothctl paired-devices`).
+Adresse selbst (Windows: PnP-Tabelle, Linux: `bluetoothctl devices Paired`).
 """
 from __future__ import annotations
 
