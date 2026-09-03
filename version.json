@@ -1,5 +1,5 @@
 {
-  "version": "1.4.1.1",
-  "notes": "Linux-only patch release on top of v1.4.1 (no upstream changes ported forward yet). Fixes: desktop notifications showed \"python3\" as the app name instead of \"Clawd\" (pystray's Linux D-Bus notifier hardcodes an empty app_name; now sent via a direct D-Bus call instead); double-click/right-click dismiss on the desktop buddy did nothing while the Buddy settings tab was open (a visibility rule meant to keep him visible while you configure him was overriding an explicit dismiss on the very next tick -- fixed on both Windows and Linux, since the bug predates this port).",
+  "version": "1.4.1.2",
+  "notes": "Linux-only patch release on top of v1.4.1 (no upstream changes ported forward yet). The main window now shows the app logo instead of GTK's generic icon, and the update dialog's download button is no longer stuck in German. Under the hood this release also hardens the previous one: the icon fix originally forced the X11 backend outright, which would have stopped the app launching entirely on a Wayland system without XWayland -- it now falls back gracefully; desktop notifications get their icon back (v1.4.1.1 fixed the app name but dropped the icon); and the autostart toggle no longer reports \"enabled\" when its target no longer exists, e.g. after moving or deleting the AppImage.",
   "url": "https://github.com/JayceTheGaymer/claude-session-browser/releases/latest"
 }
