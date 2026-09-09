@@ -469,6 +469,56 @@ BUDDY_STATE_MAP = {
     "thinking_alt": "think",         # Rotation-Alternative zu work think
 }
 
+# Uebersetzt BUDDY_STATE_MAP-Werte (Namen aus dem alten, 20x20-Sprite-Katalog
+# des Desktop-Buddys) in Namen aus dem *aktuellen* Clawdmeter-Firmware-
+# Katalog (siehe splash_animations.h dort -- offizielle Anthropic-Clawd-
+# Animationen, komplett andere Namen/Optik als der alte Katalog).
+#
+# Der urspruengliche juppeee-Fork brauchte das nicht: sein Firmware-Zweig
+# fuehrte damals noch denselben alten Katalog wie der Buddy, die Namen
+# stimmten also 1:1 ueberein. Upstream hat den Katalog seither komplett
+# ersetzt (siehe Clawdmeter-Repo, research/clawd-official/CLAUDE.md), das
+# Feature (Host schickt einen Animationsnamen, Geraet zeigt ihn -- Firmware-
+# seitig unveraendert portiert, siehe splash_set_anim() dort) blieb gleich,
+# nur das Vokabular passt nicht mehr zusammen. Diese Tabelle ist die
+# Bruecke: pro Buddy-Zustand die vom aktuellen Katalog am besten passende
+# Animation, oder "" wenn keine gut genug passt -- dann entscheidet das
+# Geraet selbst anhand der Nutzungsrate (siehe splash_pick_for_current_rate
+# dort), statt eine schlecht passende Vibe aufzuzwingen.
+#
+# Herleitung je Eintrag (Vibe-Begruendung, nicht nur geraten): laptop fuer
+# aktives Coden (woertlich Clawd am Laptop), magnifier fuers Nachdenken
+# (Lupen-/Detektiv-Pose), pointing fuer eine Rueckfrage (zeigt/fordert
+# Aufmerksamkeit), waving fuers Fertig-Warten ("dein Zug"), walking als
+# ruhiges Idle (Firmware selbst stuft es in ihre eigene "idle/sleepy"-
+# Gruppe ein, siehe GROUP_NAMES in splash.cpp dort), lurking als bester
+# verfuegbarer Sleep-Ersatz (keine echte Schlaf-Pose im neuen Katalog,
+# aber die einzige "leerer Bildschirm, kommt kurz rein und geht wieder"-
+# Animation -- kommt "wird ruhig" naeher als alles andere), dancing fuer
+# Party (direkter Treffer), jumping happy fuer Surprise (freudiger
+# Ausbruch). limit/recent/none/wink bewusst ohne Override: fuer "sauer"
+# gibt's keine passende Pose im neuen Katalog (das Geraet zeigt den
+# Limit-Status ohnehin schon anderswo), recent ist zu kurzlebig fuer einen
+# Wechsel, none hat nichts zu zeigen, wink ist eine reine Desktop-Easter-
+# Egg-Geste ohne Grund sie aufs Geraet zu spiegeln.
+CLAWDMETER_ANIM_MAP = {
+    "work coding":        "laptop",
+    "write":              "laptop",         # active_alt -> gleiches Ziel wie active
+    "work think":         "magnifier",
+    "think":              "magnifier",      # thinking_alt -> gleiches Ziel wie thinking
+    "allow":              "pointing",
+    "done":               "waving",
+    "idle breathe":       "walking",
+    "expression sleep":   "lurking",
+    "dance bounce":       "dancing",
+    "dance sway":         "dancing",
+    "expression surprise": "jumping happy",
+    "limit":              "",
+    "idle blink":         "",
+    "idle look around":   "",
+    "expression wink":    "",
+}
+
 # Sehr spezifische Muster in der neuesten .jsonl-Datei die eindeutig auf ein
 # erreichtes Claude-Nutzungslimit hindeuten. Absichtlich streng gewaehlt
 # damit normale Chat-Erwaehnungen von „rate limit" o.ae. NICHT triggern.
@@ -5023,13 +5073,25 @@ class Api:
 
         "" heisst: keine Vorgabe, das Geraet entscheidet nach Auslastung. Das
         ist auch der Fall wenn der Buddy selbst aus ist -- ohne laufenden
-        Buddy gibt es keinen Zustand zu spiegeln."""
+        Buddy gibt es keinen Zustand zu spiegeln.
+
+        self.buddy.current_anim() liefert einen Namen aus dem alten
+        Sprite-Katalog des Desktop-Buddys (z.B. "work coding") -- der passt
+        nicht mehr zum aktuellen Firmware-Katalog des Geraets, siehe
+        CLAWDMETER_ANIM_MAP fuer die Begruendung. Ein unbekannter Name
+        (Katalog-Drift in Zukunft) faellt auf "" zurueck statt einen
+        moeglicherweise falschen Namen zu schicken -- die Firmware wuerde
+        einen unbekannten Namen zwar ohnehin ignorieren und selbst
+        entscheiden (siehe splash_set_anim() dort), aber explizit "" ist
+        hier klarer als sich auf das implizite Firmware-Verhalten zu
+        verlassen."""
         if not self.settings.get("clawdmeter_buddy", True):
             return ""
         try:
-            return self.buddy.current_anim()
+            old_name = self.buddy.current_anim()
         except Exception:
             return ""
+        return CLAWDMETER_ANIM_MAP.get(old_name, "")
 
     def _clawd_link(self):
         """Lazy-Init des BLE-Links. None wenn das Modul nicht verfuegbar ist."""

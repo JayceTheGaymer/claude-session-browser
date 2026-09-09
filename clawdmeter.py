@@ -641,7 +641,8 @@ class ClawdmeterLink:
         self._last_anim = anim
 
         data = json.dumps(payload, separators=(",", ":")).encode()
-        await client.write_gatt_char(RX_CHAR_UUID, data, response=False)
+        # response=True statt False, da "Write Without Response" keine Zustellung garantiert.
+        await client.write_gatt_char(RX_CHAR_UUID, data, response=True)
         self._set(last_send=time.time(), last_error=None)
         if poll:
             self._log(f"Clawdmeter: {payload['s']}% / {payload['w']}%"
