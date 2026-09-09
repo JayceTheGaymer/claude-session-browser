@@ -1,5 +1,5 @@
 {
-  "version": "1.4.1.2",
-  "notes": "Linux-only patch release on top of v1.4.1 (no upstream changes ported forward yet). The main window now shows the app logo instead of GTK's generic icon, and the update dialog's download button is no longer stuck in German. Under the hood this release also hardens the previous one: the icon fix originally forced the X11 backend outright, which would have stopped the app launching entirely on a Wayland system without XWayland -- it now falls back gracefully; desktop notifications get their icon back (v1.4.1.1 fixed the app name but dropped the icon); and the autostart toggle no longer reports \"enabled\" when its target no longer exists, e.g. after moving or deleting the AppImage.",
+  "version": "1.4.1.3",
+  "notes": "Linux-only patch release on top of v1.4.1 (no upstream changes ported forward yet). Fixes Clawdmeter animation-mirroring, which shipped non-functional in earlier Linux releases: the desktop buddy's animation names never matched the physical Clawdmeter's current firmware catalog, so the device silently ignored them and just picked its own animations. A new translation table fixes that, and the BLE write itself switches to a more reliable mode. Verified end to end on real hardware -- the desktop buddy's actual activity (coding, thinking, waiting, idle) now correctly mirrors onto the device.",
   "url": "https://github.com/JayceTheGaymer/claude-session-browser/releases/latest"
 }
