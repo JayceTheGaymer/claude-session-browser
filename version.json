@@ -1,5 +1,5 @@
 {
-  "version": "1.4.1.3",
-  "notes": "Linux-only patch release on top of v1.4.1 (no upstream changes ported forward yet). Fixes Clawdmeter animation-mirroring, which shipped non-functional in earlier Linux releases: the desktop buddy's animation names never matched the physical Clawdmeter's current firmware catalog, so the device silently ignored them and just picked its own animations. A new translation table fixes that, and the BLE write itself switches to a more reliable mode. Verified end to end on real hardware -- the desktop buddy's actual activity (coding, thinking, waiting, idle) now correctly mirrors onto the device.",
+  "version": "1.4.2",
+  "notes": "Ports upstream v1.4.2: the session list now quietly refreshes when the window regains focus (tray restore, taskbar click, or a second launch), instead of only at startup or on the refresh button, so a window left in the tray no longer shows a stale list. Parsed sessions are now cached per file by size and modification time, so a refresh only re-reads transcripts that actually changed. Also carries forward all Linux-only fixes from v1.4.1.1-1.4.1.3 (notification icon/name, window icon, X11/Wayland launch safety, autostart validation, update-dialog translation, Clawdmeter animation-mirroring).",
   "url": "https://github.com/JayceTheGaymer/claude-session-browser/releases/latest"
 }
