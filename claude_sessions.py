@@ -73,7 +73,7 @@ except Exception:
 logging.getLogger("pywebview").setLevel(logging.CRITICAL)
 
 # ----- Version & Update ---------------------------------------------------- #
-VERSION = "1.4.2"
+VERSION = "1.4.2.0"
 # Wird beim GitHub-Setup auf dein echtes Repo gesetzt (OWNER/REPO):
 UPDATE_URL = "https://raw.githubusercontent.com/JayceTheGaymer/claude-session-browser/main/version.json"
 
@@ -7782,8 +7782,8 @@ function renderSettings(){
       </div>
       <div class="row2">
         <div><div class="lbl">Clawdmeter-Firmware, Fork</div>
-          <div class="desc">Hermanns Firmware sucht sich die Animation nach Verbrauchsgeschwindigkeit aus. Damit das Gerät zeigt, was Claude gerade macht, muss dieser Fork darauf laufen — Branch csb-buddy.</div></div>
-        <button class="btn" onclick="api.open_url('https://github.com/juppeee/Clawdmeter/tree/csb-buddy')">Öffnen</button>
+          <div class="desc">Hermanns Firmware sucht sich die Animation nach Verbrauchsgeschwindigkeit aus. Damit das Gerät zeigt, was Claude gerade macht, muss dieser Fork darauf laufen.</div></div>
+        <button class="btn" onclick="api.open_url('https://github.com/JayceTheGaymer/Clawdmeter')">Öffnen</button>
       </div>
     </div>
   `;

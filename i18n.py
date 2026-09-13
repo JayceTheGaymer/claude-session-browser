@@ -291,8 +291,8 @@ TRANSLATIONS = {
             "The device and its firmware come from Hermann Björgvin. For usage and battery his firmware is all you need — the Session Browser only adds the Bluetooth connection.",
         "Clawdmeter-Firmware, Fork":
             "Clawdmeter firmware, fork",
-        "Hermanns Firmware sucht sich die Animation nach Verbrauchsgeschwindigkeit aus. Damit das Gerät zeigt, was Claude gerade macht, muss dieser Fork darauf laufen — Branch csb-buddy.":
-            "Hermann's firmware picks its animation from how fast your quota is burning. For the device to show what Claude is doing, it needs this fork on it — branch csb-buddy.",
+        "Hermanns Firmware sucht sich die Animation nach Verbrauchsgeschwindigkeit aus. Damit das Gerät zeigt, was Claude gerade macht, muss dieser Fork darauf laufen.":
+            "Hermann's firmware picks its animation from how fast your quota is burning. For the device to show what Claude is doing, it needs this fork on it.",
         "Das Gerät zeigt dieselbe Animation wie dein Clawd-Buddy auf dem Desktop — statt selbst eine nach Auslastung zu wählen. Braucht einen eingeschalteten Buddy.":
             "The device shows the same animation as your Clawd Buddy on the desktop — instead of picking one based on usage itself. Needs Buddy to be turned on.",
         "Das siehst du für jede Session. Alle Spalten kannst du in den Einstellungen ein-/ausblenden und die Reihenfolge ändern.":

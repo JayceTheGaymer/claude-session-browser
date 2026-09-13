@@ -185,8 +185,10 @@ while picking its own animations, exactly as it does without this app.
 Mirroring Clawd onto it needs two things his firmware doesn't carry yet: a
 field in the BLE payload so a host can name an animation, and sprites for the
 states it doesn't know — waiting for permission, out of quota. Until those land
-upstream they live in a [fork of his firmware](https://github.com/juppeee/Clawdmeter/tree/csb-buddy);
-flash that branch and the device acts out what Claude is doing.
+upstream they live in a [fork of his firmware](https://github.com/JayceTheGaymer/Clawdmeter);
+flash that and the device acts out what Claude is doing. (The original
+`juppeee/Clawdmeter` fork is stale and no longer matches this port's
+animation catalog — use this one instead.)
 
 **Want a case for it?** The STL files are on
 [MakerWorld](https://makerworld.com/de/@Juppi187) — print one and your
