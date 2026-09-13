@@ -73,7 +73,7 @@ except Exception:
 logging.getLogger("pywebview").setLevel(logging.CRITICAL)
 
 # ----- Version & Update ---------------------------------------------------- #
-VERSION = "1.4.2.0"
+VERSION = "1.4.2.1"
 # Wird beim GitHub-Setup auf dein echtes Repo gesetzt (OWNER/REPO):
 UPDATE_URL = "https://raw.githubusercontent.com/JayceTheGaymer/claude-session-browser/main/version.json"
 
@@ -669,6 +669,7 @@ def _latest_jsonl_status(projects_dir, max_files=200, tail_kb=8):
         "last_block_type": None,
         "last_tool_name": None,
         "has_pending_tool": False,
+        "mtime": 0.0,
     }
     if not projects_dir or not os.path.isdir(projects_dir):
         return empty
@@ -833,6 +834,7 @@ def _latest_jsonl_status(projects_dir, max_files=200, tail_kb=8):
         "last_block_type": None,
         "last_tool_name": None,
         "has_pending_tool": False,
+        "mtime": newest_mtime,
     }
 
     if is_limit:
@@ -5316,6 +5318,14 @@ class Api:
                 st = _latest_jsonl_status(self._projects_dir())
                 hit = bool(st.get("is_limit"))
                 until = float(st.get("reset_at") or 0)
+                # Ohne lesbare Reset-Zeit (siehe unten) ist das Dateialter die
+                # einzige Bremse gegen eine tagealte Limit-Zeile: derselbe
+                # Cutoff wie in detect_state() fuer den Buddy (dort ueber
+                # _pub_limit oben bereits mit drin, hier fehlte er noch -
+                # sonst zeigt ein kalter Start mit dem Buddy aus 100%, bis die
+                # echte Messung eintrifft).
+                if hit and not until and (now - float(st.get("mtime") or 0)) >= 3600:
+                    hit = False
             except Exception:
                 pass
         # Eine Meldung, deren Reset-Zeit durch ist, beschreibt ein Fenster, das
