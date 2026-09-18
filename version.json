@@ -1,5 +1,5 @@
 {
-  "version": "1.5.0.0",
-  "notes": "Ports upstream v1.4.4-v1.5.0: Buddy and the busy indicator recognise Claude Code's new title spinner (a rotating half-circle) alongside the old Braille one, so busy detection keeps working after a Claude Code update. A limit-reset event no longer fires both the on-screen card and a tray notification for the same reset. Clawdmeter moved out of the settings list into its own tab, and table columns can now be resized by dragging their header borders (double-click fits a column to its content); widths are remembered per column.",
+  "version": "1.5.1.0",
+  "notes": "Ports upstream v1.5.1: the Clawdmeter connects again once it is paired. Windows keeps a paired Clawdmeter connected as a keyboard, so it stops advertising, and the app never found it by scanning. It now connects directly by address on Windows; this is a no-op on Linux, which already connects by address via BlueZ.",
   "url": "https://github.com/JayceTheGaymer/claude-session-browser/releases/latest"
 }
