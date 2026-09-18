@@ -73,7 +73,7 @@ except Exception:
 logging.getLogger("pywebview").setLevel(logging.CRITICAL)
 
 # ----- Version & Update ---------------------------------------------------- #
-VERSION = "1.4.3.0"
+VERSION = "1.5.0.0"
 # Wird beim GitHub-Setup auf dein echtes Repo gesetzt (OWNER/REPO):
 UPDATE_URL = "https://raw.githubusercontent.com/JayceTheGaymer/claude-session-browser/main/version.json"
 
@@ -531,12 +531,22 @@ APPROVAL_AFTER_S = 30.0
 _BUSY_CACHE = {"t": 0.0, "v": False}
 
 
+def _is_spinner(ch):
+    """Laufanzeige am Titelanfang? Kennt beide Formen, die Claude Code bisher
+    benutzt hat - kennt sie eine nicht, gilt Claude nie als beschaeftigt, und
+    jedes laengere Werkzeug sieht nach 30 s wie eine Rueckfrage aus."""
+    o = ord(ch)
+    return 0x2800 <= o <= 0x28FF or 0x25D0 <= o <= 0x25D3
+
+
 def _claude_is_busy():
     """True wenn irgendein Claude-Terminal gerade sichtbar arbeitet.
 
-    Claude Code stellt dem Fenstertitel waehrend der Arbeit ein Braille-Zeichen
-    als Laufanzeige voran (U+2800..U+28FF, z.B. '⠂ Mein Projekt'). Sobald
-    Claude auf eine Eingabe oder eine Erlaubnis wartet, verschwindet es.
+    Claude Code stellt dem Fenstertitel waehrend der Arbeit eine Laufanzeige
+    voran. Aeltere Versionen nahmen Braille-Zeichen (U+2800..U+28FF, z.B.
+    '⠂ Mein Projekt'), neuere drehen einen Halbkreis (U+25D0..U+25D3,
+    '◐ Mein Projekt'). Sobald Claude auf eine Eingabe oder eine Erlaubnis
+    wartet, verschwindet sie.
 
     Das ist das einzige Lebenszeichen von aussen: waehrend ein Werkzeug laeuft,
     schreibt Claude Code nichts ins Protokoll, und die Rueckfrage steht nur im
@@ -556,7 +566,7 @@ def _claude_is_busy():
             t = title.strip()
             if not t or "claude" not in t.lower():
                 continue
-            if 0x2800 <= ord(t[0]) <= 0x28FF:
+            if _is_spinner(t[0]):
                 busy = True
                 break
     except Exception:
@@ -2690,49 +2700,66 @@ class BuddyController:
         if self.is_alive():
             self._q.put(("pulse", "surprise"))
 
+    # Drei Stellen koennen den Reset melden (Timer, Limit-Abfrage, Session-
+    # Aktivitaet), jede auf ihrem eigenen Thread. Pruefen und Markieren
+    # muessen deshalb ein Schritt sein, sonst rutschen zwei gleichzeitig durch.
+    _limit_reset_lock = threading.Lock()
+
     def _notify_limit_reset(self):
-        """Feuert die Limit-Reset-Karte (persistent, dismissible) + optional
-        Windows-Tray-Notification. Doppel-Feuer wird via
-        limit_reset_notified_for verhindert."""
+        """Zeigt die Limit-Reset-Karte (bleibt stehen, bis man sie wegklickt).
+
+        Eine Windows-Benachrichtigung gibt es nur noch, wenn die Karte nicht
+        erscheinen konnte - vorher kamen beide fuer dasselbe Ereignis."""
         if not self.api.settings.get("notify_limit_reset", True):
             return
-        # Doppel-Schutz: fuer welche Reset-Zeit haben wir schon benachrichtigt?
-        reset_at = float(self.api.settings.get("limit_reset_at", 0) or 0)
-        notified_for = float(
-            self.api.settings.get("limit_reset_notified_for", 0) or 0)
-        if reset_at > 0 and abs(notified_for - reset_at) < 30:
-            return
-        # Karte zeigen
+        with self._limit_reset_lock:
+            # Doppel-Schutz: fuer welche Reset-Zeit haben wir schon gemeldet?
+            reset_at = float(self.api.settings.get("limit_reset_at", 0) or 0)
+            notified_for = float(
+                self.api.settings.get("limit_reset_notified_for", 0) or 0)
+            if reset_at > 0 and abs(notified_for - reset_at) < 30:
+                return
+            # Nach einer Meldung steht limit_reset_at auf 0, und ein Ausloeser
+            # ohne bekannte Reset-Zeit (Session-Aktivitaet) kam frueher
+            # deshalb immer durch. Zwei echte Resets liegen Stunden
+            # auseinander - innerhalb einer halben Stunde ist es derselbe.
+            last = float(
+                self.api.settings.get("limit_reset_notified_at", 0) or 0)
+            if time.time() - last < 30 * 60:
+                return
+            # Markieren, bevor irgendetwas erscheint.
+            try:
+                if reset_at > 0:
+                    self.api.settings["limit_reset_notified_for"] = reset_at
+                self.api.settings["limit_reset_notified_at"] = time.time()
+                self.api.settings["limit_reset_at"] = 0
+                save_json(SETTINGS_FILE, self.api.settings)
+            except Exception:
+                pass
+        shown = False
         try:
             toast = getattr(self.api, "_reset_toast", None)
             if toast is None:
                 toast = LimitResetToast()
                 self.api._reset_toast = toast
             toast.show(avoid=self._pub_rect)
+            shown = True
         except Exception:
             pass
-        # Zusaetzlich Tray-Notification als Bonus
-        tray = getattr(self.api, "_tray", None)
-        if tray and tray.icon:
-            try:
-                _tray_notify(
-                    tray.icon,
-                    t("Dein Claude-Limit ist zurück – weitermachen!"),
-                    "Clawd")
-            except Exception:
-                pass
+        if not shown:
+            tray = getattr(self.api, "_tray", None)
+            if tray and tray.icon:
+                try:
+                    _tray_notify(
+                        tray.icon,
+                        t("Dein Claude-Limit ist zurück – weitermachen!"),
+                        "Clawd")
+                except Exception:
+                    pass
         # Buddy kurz "surprise" spielen wenn er sichtbar ist
         try:
             if self.is_alive():
                 self._q.put(("pulse", "surprise"))
-        except Exception:
-            pass
-        # Marker speichern damit's nicht doppelt feuert
-        try:
-            if reset_at > 0:
-                self.api.settings["limit_reset_notified_for"] = reset_at
-            self.api.settings["limit_reset_at"] = 0
-            save_json(SETTINGS_FILE, self.api.settings)
         except Exception:
             pass
 
@@ -4849,8 +4876,24 @@ class Api:
             "x": s.get("win_x"), "y": s.get("win_y"),
         }
 
+        self._hwnd = 0
+
+        def is_normal():
+            # pywebview ruft jeden Handler in einem eigenen Thread auf. Beim
+            # Maximieren kommt "moved" mit -8/-8 und "resized" mit der vollen
+            # Groesse oft vor "maximized" an - self._max steht dann noch auf
+            # False, und die Maximiert-Lage landete als normale Lage in den
+            # Einstellungen. Nach dem naechsten Wiederherstellen ragte die
+            # Titelleiste oben aus dem Bildschirm. Deshalb den echten
+            # Fensterzustand fragen.
+            if self._max:
+                return False
+            if not self._hwnd:
+                self._hwnd = _own_window_hwnd()
+            return _window_is_normal(self._hwnd)
+
         def on_resized(*a):
-            if len(a) >= 2 and not self._max:
+            if len(a) >= 2 and is_normal():
                 self._geo["w"], self._geo["h"] = a[0], a[1]
 
         def on_moved(*a):
@@ -4859,7 +4902,7 @@ class Api:
             # Position gespeichert - und beim naechsten Start ein Fenster
             # ausserhalb jedes Bildschirms: Eintrag in der Taskleiste, aber
             # nichts zu sehen, und das dauerhaft.
-            if len(a) >= 2 and not self._max:
+            if len(a) >= 2 and is_normal():
                 if a[0] <= -30000 or a[1] <= -30000:
                     return
                 self._geo["x"], self._geo["y"] = a[0], a[1]
@@ -4879,6 +4922,10 @@ class Api:
 
         def on_restore(*a):
             self._max = False
+            # Aus dem Maximiert-Zustand geht Windows auf die gemerkte normale
+            # Lage zurueck. Stammt die von einem anderen Monitor oder aus
+            # einer aelteren Version, haengt die Titelleiste oben heraus.
+            _fit_main_window_now()
 
         def on_closing(*a):
             if getattr(self, "_geo_saved", False):
@@ -6142,9 +6189,19 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .th{
     padding:13px 12px; font-size:11.5px; font-weight:700; color:var(--muted);
     text-transform:uppercase; letter-spacing:.6px; cursor:pointer; white-space:nowrap;
-    display:flex; align-items:center; gap:5px;
+    display:flex; align-items:center; gap:5px; min-width:0; overflow:hidden;
   }
   .th:hover{color:var(--fg)}
+  .th{position:relative}
+  /* Griff zum Ziehen der Spaltenbreite, am rechten Rand jeder Kopfzelle */
+  .colgrip{position:absolute; top:0; right:0; width:9px; height:100%; cursor:col-resize; z-index:2}
+  .colgrip::after{content:""; position:absolute; top:28%; bottom:28%; right:3px; width:2px;
+    border-radius:1px; background:var(--muted); opacity:0; transition:opacity .1s}
+  .th:hover .colgrip::after, .colgrip.active::after{opacity:.7}
+  .colw-tip{position:fixed; z-index:9999; padding:3px 8px; border-radius:6px; background:var(--bg);
+    border:1px solid var(--border); font-size:11.5px; color:var(--fg); pointer-events:none;
+    font-variant-numeric:tabular-nums}
+  body.col-resizing, body.col-resizing *{cursor:col-resize !important; user-select:none}
   .th.num{justify-content:flex-start}
   .th .arr{font-size:10px; opacity:.9}
   .tbody{flex:1; overflow-y:auto; padding:5px}
@@ -6615,6 +6672,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="tabs">
     <div class="tab active" data-view="sessions" onclick="switchView('sessions')">Sessions</div>
     <div class="tab" data-view="buddy" onclick="switchView('buddy')">Buddy</div>
+    <div class="tab" data-view="clawd" onclick="switchView('clawd')">Clawdmeter</div>
     <div class="tab" data-view="settings" onclick="switchView('settings')">Einstellungen</div>
   </div>
 
@@ -6696,6 +6754,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div class="count" id="buddy-status"></div>
     </div>
     <div class="settings" id="buddy-panel"></div>
+  </div>
+
+  <!-- Clawdmeter -->
+  <div class="view" id="view-clawd">
+    <div class="head">
+      <h1 class="titlewrap">
+        <span class="hlogo" id="clawd-hlogo" style="display:inline-flex;align-items:center;justify-content:center;color:var(--accent)"></span>
+        <span>Clawdmeter</span>
+      </h1>
+      <div class="count" id="clawd-head-status"></div>
+    </div>
+    <div class="settings" id="clawd-panel"></div>
   </div>
 
   <!-- Einstellungen -->
@@ -6961,8 +7031,10 @@ const COLORS = ["#4aa3ff","#3ecf8e","#ffb454","#ff6b6b","#c08cff","#ffe066","#34
 const ALL_COLS = {
   title:   {label:"Titel",         grow:"2.6fr"},
   project: {label:"Ordner",        grow:"2fr"},
-  msgs:    {label:"Nachrichten",   grow:"1.1fr", num:true},
-  when:    {label:"Zuletzt aktiv", grow:"1fr"},
+  // Feste Untergrenze fuer die kurzen Spalten: nur mit Anteilen schrumpften
+  // sie im kleinen Fenster mit und schnitten Datum und Anzahl ab.
+  msgs:    {label:"Nachrichten",   grow:"minmax(120px,1.1fr)", num:true},
+  when:    {label:"Zuletzt aktiv", grow:"minmax(150px,1fr)"},
   id:      {label:"Session-ID",    grow:"1.7fr"},
   first:   {label:"Erste Frage",   grow:"2.4fr"},
 };
@@ -6971,10 +7043,144 @@ function normCols(){
   const saved=(STATE && STATE.settings.columns)||[];
   const order=saved.map(c=>c.key).filter(k=>ALL_COLS[k]);
   Object.keys(ALL_COLS).forEach(k=>{ if(!order.includes(k)) order.push(k); });
-  return order.map(k=>{const f=saved.find(c=>c.key===k); return {key:k, on: f?!!f.on:DEFAULT_ON[k]};});
+  return order.map(k=>{const f=saved.find(c=>c.key===k);
+    const col={key:k, on: f?!!f.on:DEFAULT_ON[k]};
+    // Gezogene Breite in Pixeln; ohne w bleibt die Spalte anteilig.
+    if(f && f.w) col.w=Math.max(COL_MIN[k]||60, Math.round(f.w));
+    return col;});
 }
-function visCols(){ return normCols().filter(c=>c.on).map(c=>({key:c.key, ...ALL_COLS[c.key]})); }
-function applyCols(){ document.documentElement.style.setProperty('--cols', visCols().map(c=>c.grow).join(' ')); }
+// Mindestbreiten. Nachrichten und Zuletzt aktiv wie seit e4fe3b2 - darunter
+// schnitten sie Anzahl und Datum ab.
+const COL_MIN = {title:160, project:120, msgs:120, when:150, id:110, first:160};
+// So viel Platz soll dem Titel bleiben. Wird es weniger, weicht der Ordner -
+// er steht ohnehin im Detailpanel. Mit den Standardbreiten liegt die Grenze
+// bei rund 640 px Tabellenbreite, wie vorher fest eingestellt.
+const TITLE_ROOM = 250;
+let tableNarrow = false, tableW = 0;
+let COLW_TEMP = {};   // Breite waehrend des Ziehens, noch nicht gespeichert
+
+function visCols(){
+  return normCols().filter(c=>c.on && !(tableNarrow && c.key==='project'))
+                   .map(c=>({...c, ...ALL_COLS[c.key]}));
+}
+// Die Spalte, die den Rest nimmt: der Titel, ohne Titel die letzte.
+function fillerKey(cols){
+  if(!cols.length) return '';
+  return cols.some(c=>c.key==='title') ? 'title' : cols[cols.length-1].key;
+}
+function colFr(grow){ const m=/([\d.]+fr)\)?$/.exec(grow||''); return m?m[1]:'1fr'; }
+function colTrack(c, filler){
+  const min=COL_MIN[c.key]||60;
+  const w=COLW_TEMP[c.key]||c.w;
+  if(c.key!==filler && w) return w+'px';
+  return `minmax(${min}px,${colFr(c.grow)})`;
+}
+function checkNarrow(){
+  if(!tableW) return;
+  const cols=normCols().filter(c=>c.on), f=fillerKey(cols);
+  let narrow=false;
+  if(cols.some(c=>c.key==='project') && f!=='project'){
+    const belegt=cols.filter(c=>c.key!==f)
+      .reduce((a,c)=>a+(COLW_TEMP[c.key]||c.w||COL_MIN[c.key]||60), 0);
+    const room = f==='title' ? TITLE_ROOM : (COL_MIN[f]||60);
+    narrow = (tableW - 12 - belegt) < room;
+  }
+  if(narrow===tableNarrow) return;
+  tableNarrow=narrow;
+  if(STATE){ renderHead(); render(); }
+}
+function watchTableWidth(){
+  const el=document.querySelector('.table');
+  if(!el || !window.ResizeObserver) return;
+  new ResizeObserver(([e])=>{
+    const w=e.contentRect.width;
+    if(!w) return;   // Tab nicht sichtbar
+    tableW=w;
+    checkNarrow();
+  }).observe(el);
+}
+function applyCols(){
+  const cols=visCols(), f=fillerKey(cols);
+  document.documentElement.style.setProperty('--cols', cols.map(c=>colTrack(c,f)).join(' '));
+}
+
+// ---- Spaltenbreite ziehen (wie in Excel) ----
+// Der Griff sitzt am rechten Rand einer Spalte und aendert deren Breite. Am
+// Rand der Titelspalte zieht er stattdessen die Nachbarspalte - der Titel
+// selbst nimmt immer den Rest.
+function colTarget(key){
+  const cols=visCols(), f=fillerKey(cols), i=cols.findIndex(c=>c.key===key);
+  if(i<0) return null;
+  if(key!==f) return {key, sign:1, idx:i};
+  const nb=cols[i+1];
+  return nb ? {key:nb.key, sign:-1, idx:i+1} : null;
+}
+let COLDRAG=null;
+function colDragStart(ev, key){
+  ev.preventDefault(); ev.stopPropagation();
+  const tg=colTarget(key); if(!tg) return;
+  const th=document.querySelectorAll('#thead .th')[tg.idx]; if(!th) return;
+  const tip=document.createElement('div'); tip.className='colw-tip'; document.body.appendChild(tip);
+  COLDRAG={...tg, x0:ev.clientX, w0:Math.round(th.getBoundingClientRect().width),
+           w:0, moved:false, tip, grip:ev.currentTarget};
+  COLDRAG.grip.classList.add('active');
+  document.body.classList.add('col-resizing');
+  document.addEventListener('mousemove', colDragMove);
+  document.addEventListener('mouseup', colDragEnd);
+}
+function colDragMove(ev){
+  const d=COLDRAG; if(!d) return;
+  const dx=ev.clientX-d.x0;
+  if(!d.moved && Math.abs(dx)<2) return;
+  d.moved=true;
+  d.w=Math.max(COL_MIN[d.key]||60, Math.round(d.w0 + d.sign*dx));
+  COLW_TEMP={[d.key]: d.w};
+  applyCols();
+  d.tip.textContent=d.w+' px';
+  d.tip.style.left=(ev.clientX+14)+'px'; d.tip.style.top=(ev.clientY+16)+'px';
+}
+function colDragEnd(){
+  const d=COLDRAG; COLDRAG=null;
+  document.removeEventListener('mousemove', colDragMove);
+  document.removeEventListener('mouseup', colDragEnd);
+  document.body.classList.remove('col-resizing');
+  if(!d) return;
+  d.tip.remove(); d.grip.classList.remove('active');
+  // Ein Klick ohne Bewegung (auch jeder Teil eines Doppelklicks) speichert
+  // nichts - sonst waere die Spalte danach ungewollt auf Pixel festgelegt.
+  if(d.moved) saveColWidth(d.key, d.w);
+}
+// Doppelklick auf den Griff: Spalte auf ihren breitesten Inhalt setzen.
+// Gemessen wird der Text selbst ueber eine Range - scrollWidth ist nie
+// kleiner als die Zelle und liefert deshalb nur die jetzige Breite.
+function contentWidth(el, stopBefore){
+  const r=document.createRange();
+  r.selectNodeContents(el);
+  if(stopBefore) r.setEndBefore(stopBefore);
+  const cs=getComputedStyle(el);
+  return r.getBoundingClientRect().width
+       + parseFloat(cs.paddingLeft||0) + parseFloat(cs.paddingRight||0);
+}
+function colFit(ev, key){
+  ev.preventDefault(); ev.stopPropagation();
+  const tg=colTarget(key); if(!tg) return;
+  let w=0;
+  const th=document.querySelectorAll('#thead .th')[tg.idx];
+  if(th) w=contentWidth(th, th.querySelector('.colgrip'));
+  document.querySelectorAll('#tbody .row').forEach(r=>{
+    const c=r.children[tg.idx]; if(c) w=Math.max(w, contentWidth(c));
+  });
+  if(w) saveColWidth(tg.key, Math.max(COL_MIN[tg.key]||60, Math.ceil(w)+4));
+}
+async function saveColWidth(key, w){
+  const cols=normCols();
+  const c=cols.find(x=>x.key===key); if(!c) return;
+  c.w=w;
+  COLW_TEMP={};
+  ingest(await api.update_setting('columns', cols));
+  checkNarrow();
+  renderHead(); render();
+}
 function cellHtml(s,key){
   switch(key){
     case 'title':   return `<div class="cell title">${esc(s.display_title)}</div>`;
@@ -7076,6 +7282,7 @@ async function boot(){
     buildSwatches();
     renderHead();
     render();
+    watchTableWidth();
     renderSettings();
     renderShortcutBar('sessions');   // Startansicht
     // Onboarding zeigen bei Erstinstallation ODER wenn seit dem letzten Anzeigen
@@ -7138,9 +7345,15 @@ function visible(){
 
 function renderHead(){
   applyCols();
-  document.getElementById('thead').innerHTML = visCols().map(c=>{
+  const cols = visCols(), f = fillerKey(cols);
+  document.getElementById('thead').innerHTML = cols.map((c,i)=>{
     const arr = c.key===sortCol ? `<span class="arr">${sortRev?'▼':'▲'}</span>`:'';
-    return `<div class="th ${c.num?'num':''}" onclick="sortBy('${c.key}')">${t(c.label)}${arr}</div>`;
+    // Kein Griff nur dort, wo nichts zu ziehen ist: am rechten Rand der
+    // letzten Spalte, wenn sie selbst den Rest nimmt.
+    const grip = (c.key===f && i===cols.length-1) ? '' :
+      '<span class="colgrip" onmousedown="colDragStart(event,\'' + c.key + '\')"'
+      + ' ondblclick="colFit(event,\'' + c.key + '\')" onclick="event.stopPropagation()"></span>';
+    return `<div class="th ${c.num?'num':''}" onclick="sortBy('${c.key}')">${t(c.label)}${arr}${grip}</div>`;
   }).join('');
 }
 
@@ -7239,6 +7452,8 @@ function switchView(v){
   document.getElementById('view-sessions').classList.toggle('active',v==='sessions');
   document.getElementById('view-settings').classList.toggle('active',v==='settings');
   document.getElementById('view-buddy').classList.toggle('active',v==='buddy');
+  document.getElementById('view-clawd').classList.toggle('active',v==='clawd');
+  if(v==='clawd') renderClawd();
   if(v==='buddy'){
     renderBuddy();
     if(!BUDDY_STATUS_TIMER) BUDDY_STATUS_TIMER = setInterval(refreshBuddyStatus, 2500);
@@ -7258,6 +7473,7 @@ function renderAll(){
   render();
   renderSettings();
   if(v === 'buddy') renderBuddy();
+  if(v === 'clawd') renderClawd();
   renderShortcutBar(v);
 }
 
@@ -7754,40 +7970,6 @@ function renderSettings(){
       </div>
     </div>
 
-    <div class="card">
-      <h2>${ic('bluetooth')}Clawdmeter</h2>
-      <div class="sub">Schickt deine Claude-Auslastung per Bluetooth an ein Clawdmeter-Gerät. Das Gerät muss einmalig über die Bluetooth-Einstellungen deines Systems gekoppelt werden.</div>
-      <div class="row2">
-        <div><div class="lbl">Anbindung aktiv</div><div class="desc" id="clawd-status">…</div></div>
-        <div class="toggle ${st.clawdmeter?'on':''}" onclick="toggleClawd(this)"></div>
-      </div>
-      <div class="row2">
-        <div><div class="lbl">Gerät</div><div class="desc">Welches gekoppelte Gerät benutzt wird.</div></div>
-        <select class="sel-input" id="clawd-dev" onchange="pickClawd(this.value)">
-          <option value="">Wird geladen…</option>
-        </select>
-      </div>
-      <div class="row2">
-        <div><div class="lbl">Clawd-Buddy spiegeln</div><div class="desc">Das Gerät zeigt dieselbe Animation wie dein Clawd-Buddy auf dem Desktop — statt selbst eine nach Auslastung zu wählen. Braucht einen eingeschalteten Buddy.</div></div>
-        <div class="toggle ${st.clawdmeter_buddy!==false?'on':''}" onclick="toggleClawdBuddy(this)"></div>
-      </div>
-      <div class="row2">
-        <div><div class="lbl">Warnen wenn der Akku zur Neige geht</div>
-          <div class="desc">Meldet sich einmal, sobald der Akku des Geräts unter die Schwelle fällt. Erst nach dem Laden wieder.</div></div>
-        <div class="toggle ${st.notify_clawd_battery!==false?'on':''}" onclick="toggleClawdBattery(this)"></div>
-      </div>
-      <div class="row2">
-        <div><div class="lbl">Schwelle für die Akku-Warnung</div>
-          <div class="desc">Ab wie viel Restladung gewarnt wird.</div></div>
-        <div><input type="number" min="5" max="90" step="5"
-             value="${st.clawd_battery_pct||15}" onchange="setClawdBatteryPct(this)"
-             style="width:74px;text-align:right"> %</div>
-      </div>
-      <div class="field">
-        <button class="btn accent" onclick="clawdReconnect(this)">Jetzt verbinden</button>
-        <button class="btn" onclick="loadClawdDevices(true)">Geräte neu suchen</button>
-      </div>
-    </div>
 
     <div class="secthead" id="sect-app">App</div>
     <div class="card">
@@ -7825,8 +8007,6 @@ function renderSettings(){
   buildSettingsJump();
   refreshHooks();
   refreshLimit();
-  refreshClawd();
-  loadClawdDevices(false);
 }
 
 // ---- Limit-Anzeige ----
@@ -8000,15 +8180,77 @@ function setClawdStatus(el, r){
   const i = clawdInfo(r);
   el.innerHTML = `<span class="dot ${i.dot}"></span>${esc(i.text)}` + battHtml(i.akku);
 }
+// Eigener Tab seit 1.5.0 - der Block war der groesste auf der Einstellungs-
+// seite und eher eine Geraeteansicht als eine Einstellung. Solange die
+// Anbindung aus ist, steht nur der Schalter mit dem Kopplungshinweis da.
+function renderClawd(){
+  const box = document.getElementById('clawd-panel');
+  if(!box) return;
+  const st = STATE.settings, on = !!st.clawdmeter;
+  const logo = document.getElementById('clawd-hlogo');
+  if(logo) logo.innerHTML = '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" '
+    + 'stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
+    + (ICONS.bluetooth||'') + '</svg>';
+  // Getrennt statt verschachtelt: tools/check_i18n.py liest keine
+  // Template-Strings in Template-Strings.
+  const rest = on ? `
+      <div class="row2">
+        <div><div class="lbl">Gerät</div><div class="desc">Welches gekoppelte Gerät benutzt wird.</div></div>
+        <select class="sel-input" id="clawd-dev" onchange="pickClawd(this.value)">
+          <option value="">Wird geladen…</option>
+        </select>
+      </div>
+      <div class="row2">
+        <div><div class="lbl">Clawd-Buddy spiegeln</div><div class="desc">Das Gerät zeigt dieselbe Animation wie dein Clawd-Buddy auf dem Desktop — statt selbst eine nach Auslastung zu wählen. Braucht einen eingeschalteten Buddy.</div></div>
+        <div class="toggle ${st.clawdmeter_buddy!==false?'on':''}" onclick="toggleClawdBuddy(this)"></div>
+      </div>
+      <div class="row2">
+        <div><div class="lbl">Warnen wenn der Akku zur Neige geht</div>
+          <div class="desc">Meldet sich einmal, sobald der Akku des Geräts unter die Schwelle fällt. Erst nach dem Laden wieder.</div></div>
+        <div class="toggle ${st.notify_clawd_battery!==false?'on':''}" onclick="toggleClawdBattery(this)"></div>
+      </div>
+      <div class="row2">
+        <div><div class="lbl">Schwelle für die Akku-Warnung</div>
+          <div class="desc">Ab wie viel Restladung gewarnt wird.</div></div>
+        <div><input type="number" min="5" max="90" step="5"
+             value="${st.clawd_battery_pct||15}" onchange="setClawdBatteryPct(this)"
+             style="width:74px;text-align:right"> %</div>
+      </div>
+      <div class="field">
+        <button class="btn accent" onclick="clawdReconnect(this)">Jetzt verbinden</button>
+        <button class="btn" onclick="loadClawdDevices(true)">Geräte neu suchen</button>
+      </div>
+` : '';
+  box.innerHTML = `
+    <div class="card">
+      <h2>${ic('bluetooth')}Clawdmeter</h2>
+      <div class="sub">Schickt deine Claude-Auslastung per Bluetooth an ein Clawdmeter-Gerät. Das Gerät muss einmalig über die Bluetooth-Einstellungen deines Systems gekoppelt werden.</div>
+      <div class="row2">
+        <div><div class="lbl">Anbindung aktiv</div><div class="desc" id="clawd-status">…</div></div>
+        <div class="toggle ${st.clawdmeter?'on':''}" onclick="toggleClawd(this)"></div>
+      </div>
+      ${rest}
+    </div>`;
+  translateDom(box);
+  refreshClawd();
+  if(on) loadClawdDevices(false);
+}
 async function refreshClawd(){
   const el = document.getElementById('clawd-status');
   if(!el) return;
-  try{ setClawdStatus(el, await api.clawdmeter_state()); }catch(e){}
+  try{
+    const r = await api.clawdmeter_state();
+    setClawdStatus(el, r);
+    setClawdStatus(document.getElementById('clawd-head-status'), r);
+  }catch(e){}
 }
 async function toggleClawd(el){
   const on=!el.classList.contains('on'); el.classList.toggle('on',on);
   const r = await api.clawdmeter_set(on);
+  STATE.settings.clawdmeter = on;
+  renderClawd();
   setClawdStatus(document.getElementById('clawd-status'), r);
+  setClawdStatus(document.getElementById('clawd-head-status'), r);
   toast(on?t('Clawdmeter an ✓'):t('Clawdmeter aus'));
 }
 async function clawdReconnect(btn){
@@ -8852,6 +9094,18 @@ def _own_window_hwnd():
         return found["hwnd"]
     except Exception:
         return 0
+
+
+def _window_is_normal(hwnd):
+    """True wenn das Fenster weder maximiert noch minimiert ist. Ohne Handle
+    (oder ausserhalb von Windows) True - dann entscheidet der Aufrufer allein."""
+    if not _IS_WIN or not hwnd:
+        return True
+    try:
+        user32 = ctypes.windll.user32
+        return not user32.IsZoomed(hwnd) and not user32.IsIconic(hwnd)
+    except Exception:
+        return True
 
 
 def _fit_main_window_now():

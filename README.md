@@ -14,6 +14,8 @@
 
 **Every Claude Code session you ever started, in one window — search them, and double-click one to jump straight back in.**
 
+https://github.com/user-attachments/assets/4718ca04-9353-42bd-baa3-5b24d559bd8d
+
 <a href="https://github.com/JayceTheGaymer/claude-session-browser/releases/latest/download/ClaudeSessionBrowser-x86_64.AppImage"><img src="https://img.shields.io/badge/Download-AppImage%20for%20Linux-ec7456?style=for-the-badge&logo=linux&logoColor=white" alt="Download the AppImage for Linux"></a>
 
 <sub>Needs a handful of system packages most desktop Linux installs already have — see <a href="packaging/linux/PREREQUISITES.md">Prerequisites</a></sub>
@@ -40,7 +42,7 @@ and puts you back into one with a double-click.
 ## What you get
 
 - **Every session in one list** — Claude's auto-title or your own, folder, message count, last activity
-- **Find it fast** — live search across title, folder, ID and first question; sortable, configurable columns
+- **Find it fast** — live search across title, folder, ID and first question; sortable columns you can show, hide and resize by dragging their borders
 - **Make it yours** — colour-code sessions, rename them for good, copy the ID
 - **One click back in** — opens your terminal (auto-detected — kitty, GNOME Terminal, Konsole, and most others work without any setup) with the session resumed
 - **Know where your quota stands** — 5-hour and weekly usage with a live countdown to the reset
@@ -124,6 +126,7 @@ The Session Browser is built and tested on Windows only. Others have ported it:
 - **Linux** — [JayceTheGaymer/claude-session-browser](https://github.com/JayceTheGaymer/claude-session-browser) by @JayceTheGaymer ("Tested on CachyOS with KDE Plasma only")
 - **macOS** — [ryanmaule/claude-session-browser](https://github.com/ryanmaule/claude-session-browser/tree/macos-ble-port) by @ryanmaule
 - **macOS** — [amcgready/claude-session-browser](https://github.com/amcgready/claude-session-browser) by @amcgready
+- **macOS** — [wdonega/claude-session-browser](https://github.com/wdonega/claude-session-browser) by @wdonega
 
 These are independent forks. We haven't tested them — questions and bugs belong in the fork's own issues.
 
@@ -185,8 +188,8 @@ its battery level back, and warns you before it runs flat.
 </div>
 
 Pair the device once through your system's Bluetooth settings (or
-`bluetoothctl pair <MAC>` from a terminal), then enable it under
-**Settings → Connections**.
+`bluetoothctl pair <MAC>` from a terminal), then enable it in the
+**Clawdmeter** tab.
 
 **Stock firmware is enough for most of it.** Usage and battery need nothing
 special — flash Hermann's firmware as usual and the device shows your quota

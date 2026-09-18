@@ -28,6 +28,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+from i18n import t
+
 DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
@@ -368,6 +370,34 @@ def discover_address(preferred: str | None = None) -> str | None:
     return None
 
 
+# Als Funktionen, damit t() erst beim Melden uebersetzt - in der Sprache, die
+# dann eingestellt ist, nicht in der vom Programmstart.
+_BT_NICHT_VERFUEGBAR = {
+    "POWERED_OFF": lambda: t("Bluetooth ist ausgeschaltet"),
+    "NO_BLUETOOTH": lambda: t("Kein Bluetooth-Adapter gefunden"),
+    "NO_BLE_CENTRAL_ROLE":
+        lambda: t("Der Bluetooth-Adapter unterstützt kein Bluetooth LE"),
+    "DENIED_BY_USER": lambda: t("Bluetooth-Zugriff wurde verweigert"),
+    "DENIED_BY_SYSTEM": lambda: t("Bluetooth-Zugriff ist vom System gesperrt"),
+    "DENIED_BY_UNKNOWN": lambda: t("Bluetooth-Zugriff wurde verweigert"),
+}
+
+
+def _fehlertext(e: Exception) -> str:
+    """Lesbarer Grund fuer die Statuszeile.
+
+    bleak legt bei fehlendem Bluetooth Meldung und Grund zusammen in die
+    Exception. str(e) zeigt dann das rohe Tupel:
+    ('Bluetooth radio is not powered on. ...', <...Reason.POWERED_OFF: 3>)
+    """
+    grund = getattr(getattr(e, "reason", None), "name", None)
+    if grund in _BT_NICHT_VERFUEGBAR:
+        return _BT_NICHT_VERFUEGBAR[grund]()
+    if len(e.args) > 1 and isinstance(e.args[0], str):
+        return e.args[0]
+    return str(e) or type(e).__name__
+
+
 # --------------------------------------------------------------------------
 # Hintergrund-Link
 # --------------------------------------------------------------------------
@@ -470,7 +500,7 @@ class ClawdmeterLink:
             asyncio.run(self._loop())
         except Exception as e:
             self._log(f"Clawdmeter-Thread beendet: {e}")
-            self._set(connected=False, last_error=str(e))
+            self._set(connected=False, last_error=_fehlertext(e))
 
     async def _loop(self) -> None:
         import asyncio
@@ -483,7 +513,7 @@ class ClawdmeterLink:
             address = discover_address(preferred)
             if not address:
                 self._set(connected=False,
-                          last_error="Kein Gerät ausgewählt")
+                          last_error=t("Kein Gerät ausgewählt"))
                 await self._sleep(RETRY_INTERVAL)
                 continue
             self._set(address=address, attempt=fails + 1)
@@ -497,7 +527,7 @@ class ClawdmeterLink:
                 raise
             except Exception as e:
                 fails += 1
-                self._set(connected=False, last_error=str(e))
+                self._set(connected=False, last_error=_fehlertext(e))
                 self._log(f"Clawdmeter-Verbindung verloren: {e}")
                 wait = RETRY_BACKOFF[min(fails - 1, len(RETRY_BACKOFF) - 1)]
                 await self._sleep(wait)
@@ -523,7 +553,7 @@ class ClawdmeterLink:
             # zwecklos. Also melden und es spaeter nochmal probieren.
             if not any(s.uuid.lower() == SERVICE_UUID
                        for s in client.services):
-                self._set(connected=False, last_error=(
+                self._set(connected=False, last_error=t(
                     "Gerät meldet keinen Clawdmeter-Dienst — falsches Gerät, "
                     "oder es ist von einem anderen Programm belegt"))
                 self._log(f"{address}: kein Clawdmeter-Dienst gefunden")
@@ -620,11 +650,11 @@ class ClawdmeterLink:
         if poll or self._last_payload is None:
             token = read_token()
             if not token:
-                self._set(last_error="Kein Claude-Token gefunden")
+                self._set(last_error=t("Kein Claude-Token gefunden"))
                 return
             payload, meta = await asyncio.to_thread(poll_usage_meta, token)
             if not payload:
-                self._set(last_error="API-Abfrage fehlgeschlagen")
+                self._set(last_error=t("API-Abfrage fehlgeschlagen"))
                 return
             self._last_payload = payload
             # Die Limit-Ueberwachung mitfuettern, damit sie nicht dieselben
